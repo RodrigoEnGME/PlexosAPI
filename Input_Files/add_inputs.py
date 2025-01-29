@@ -11,7 +11,7 @@ import os, sys, clr
 from shutil import copyfile
 
 # load PLEXOS assemblies
-sys.path.append('C:/Program Files/Energy Exemplar/PLEXOS 10.0 API')
+sys.path.append('C:/Program Files/Energy Exemplar/PLEXOS 9.2 API')
 clr.AddReference('PLEXOS_NET.Core')
 clr.AddReference('EEUTILITY')
 clr.AddReference('EnergyExemplar.PLEXOS.Utility')
@@ -40,10 +40,6 @@ if os.path.exists(basefile):
     db.DisplayAlerts = False
     db.Connection(copiedfile)
     
-    classes = db.FetchAllClassIds()
-    collections = db.FetchAllCollectionIds()
-    properties = db.FetchAllPropertyEnums()
-    
     # Add a category
     '''
     Int32 AddCategory(
@@ -51,8 +47,8 @@ if os.path.exists(basefile):
     	String strCategory
     	)
     '''
-    db.AddCategory(classes["Generator"], 'API')
-    db.AddCategory(classes["GasPipeline"], 'API')
+    db.AddCategory(ClassEnum.Generator, 'API')
+    db.AddCategory(ClassEnum.GasPipeline, 'API')
     
     # Add an object (and the System Membership)
     '''
@@ -64,8 +60,8 @@ if os.path.exists(basefile):
     	String strDescription[ = None]
     	)
     '''
-    db.AddObject('ApiGen', classes["Generator"], True, 'API', 'Testing the API')
-    db.AddObject('ApiPipe', classes["GasPipeline"], True, 'API', 'Testing the API')
+    db.AddObject('ApiGen', ClassEnum.Generator, True, 'API', 'Testing the API')
+    db.AddObject('ApiPipe', ClassEnum.GasPipeline, True, 'API', 'Testing the API')
 
     # Add memberships
     '''
@@ -75,9 +71,9 @@ if os.path.exists(basefile):
     	String strChild
     	)
     '''
-    db.AddMembership(collections["GeneratorNodes"], 'ApiGen', '101')    
-    db.AddMembership(collections["GeneratorFuels"], 'ApiGen', 'Coal/Steam')
-    db.AddMembership(collections["ReserveGenerators"], 'Spin Up', 'ApiGen')
+    db.AddMembership(CollectionEnum.GeneratorNodes, 'ApiGen', '101')    
+    db.AddMembership(CollectionEnum.GeneratorFuels, 'ApiGen', 'Coal/Steam')
+    db.AddMembership(CollectionEnum.ReserveGenerators, 'Spin Up', 'ApiGen')
     
     # Get the System.Generators membership ID for this new generator
     '''
@@ -88,7 +84,7 @@ if os.path.exists(basefile):
     	)    
     '''
     mem_id = db.GetMembershipID(
-        collections["SystemGenerators"], 
+        CollectionEnum.SystemGenerators, 
         'System', 
         'ApiGen'
     )
@@ -113,7 +109,7 @@ if os.path.exists(basefile):
     # Add units for the new generator
     db.AddProperty(
         mem_id, 
-        properties["SystemGenerators.Units"],
+        int(SystemGeneratorsEnum.Units), 
         1, 
         0.0, 
         None, 
@@ -126,15 +122,13 @@ if os.path.exists(basefile):
         PeriodEnum.Interval
     )
 
-    mem_id = db.GetMembershipID(
-            collections["SystemGasPipelines"], 
+    db.AddProperty(
+        db.GetMembershipID(
+            CollectionEnum.SystemGasPipelines, 
             'System', 
             'ApiPipe'
-        )
-    # Add IsAvailable for the new pipeline
-    db.AddProperty(
-        mem_id,
-        properties["SystemGasPipelines.IsAvailable"], 
+         ),
+        int(SystemGasPipelinesEnum.IsAvailable), 
         1, 
         1, 
         DateTime(2024,1,1),
