@@ -86,6 +86,27 @@ celerybeat-schedule
 .venv
 venv/
 ENV/
+backend/data/
+data/*.db
+data/artifacts/
+frontend/node_modules/
+frontend/dist/
+.opencode/dist/
+data/
+docs/
+node_modules/
+Otros/
+Pruebas/
+.opencode/
+AGENTS.md
+DESIGN.md
+main.ipynb
+opencode.json
+*.zip
+Old_App/
+*.env*
+*.ruff_cache/
+*.pytest_cache/
 
 # Spyder project settings
 .spyderproject

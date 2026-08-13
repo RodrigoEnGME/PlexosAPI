@@ -1,0 +1,11 @@
+{
+  "name": "sddp-plexos-converter-devtools",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "ecc:doctor": "node -e \"console.log('ECC plugin configured through opencode.json')\""
+  },
+  "devDependencies": {
+    "ecc-universal": "^2.1.0"
+  }
+}
