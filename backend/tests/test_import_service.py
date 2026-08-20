@@ -2,7 +2,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from app.db import Base, SessionLocal, engine
-from app.models import ImportRun, Project, StudyRevision, Tenant
+from app.models import DatasetFile, ImportRun, Project, StudyRevision, Tenant
 from app.services.import_service import _control_file, _safe_extract, import_zip, run_import_job
 
 
@@ -38,6 +38,7 @@ def test_zip_import_creates_separate_revision_artifact(tmp_path: Path) -> None:
         assert revision.import_run is not None
         assert revision.import_run.status == "completed"
         assert "Semantic mapping: 1 systems" in (revision.import_run.message or "")
+        assert db.query(DatasetFile).filter_by(relative_path="UY_SDDP/sddp.dat").one().file_kind == "control"
     finally:
         db.close()
 

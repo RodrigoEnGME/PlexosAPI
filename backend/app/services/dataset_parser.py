@@ -15,10 +15,18 @@ from sqlalchemy.orm import Session
 
 from app.models import DatasetFile, DatasetRecord, ImportRun
 from app.services.encoding import detect_encoding
+from app.services.language_profile import language_code
 
 TEXT_EXTENSIONS = {".dat", ".csv", ".log", ".out", ".grf", ".all", ".ok", ".bak", ".txt"}
 BINARY_EXTENSIONS = {".bin", ".psr", ".hdr"}
 LARGE_SERIES_PREFIXES = ("hr", "rr", "rs", "rx", "dbf", "deme", "dur")
+SDDP_CONTROL_MARKERS = (
+    "IDIOMA",
+    "ETAPA",
+    "NUMERO DE ETAPAS",
+    "USA CRON",
+    "SISTEMAS",
+)
 
 
 @dataclass
@@ -41,6 +49,8 @@ def _sample_bytes(path: Path, size: int = 64 * 1024) -> bytes:
 
 
 def _classify(path: Path, sample: bytes) -> str:
+    if path.name.lower() == "sddp.dat" and _looks_like_sddp_control(sample):
+        return "control"
     if path.suffix.lower() in BINARY_EXTENSIONS or b"\x00" in sample:
         return "binary"
     if path.suffix.lower() == ".csv":
@@ -48,6 +58,17 @@ def _classify(path: Path, sample: bytes) -> str:
     if path.suffix.lower() in TEXT_EXTENSIONS:
         return "text"
     return "text" if sample else "empty"
+
+
+def _looks_like_sddp_control(sample: bytes) -> bool:
+    """Recognize text control files before generic NUL-byte classification."""
+    detection = detect_encoding(sample)
+    candidates = [detection.encoding, "utf-8", "utf-16-le", "utf-16-be", "latin-1"]
+    for encoding in dict.fromkeys(candidates):
+        text = sample.decode(encoding, errors="replace").upper()
+        if sum(marker in text for marker in SDDP_CONTROL_MARKERS) >= 2:
+            return True
+    return False
 
 
 def _section(line: str, current: str | None) -> str | None:
@@ -229,5 +250,21 @@ def parse_sddp_control(path: str | Path) -> dict[str, object]:
                 normalized = token.replace(",", ".")
                 parsed_tokens.append(float(normalized) if "." in normalized else int(normalized))
             values[key] = parsed_tokens[0] if len(parsed_tokens) == 1 else parsed_tokens
+    if isinstance(values.get("idioma"), int):
+        values["language_code"] = language_code(values["idioma"])
+    maintenance_flag = values.get("usa cron. mantenimiento")
+    if maintenance_flag == 1:
+        values["maintenance_mode"] = "schedule"
+        values["uses_maintenance_schedule"] = True
+        values["uses_programmed_outage_factor"] = False
+    elif maintenance_flag == 0:
+        values["maintenance_mode"] = "programmed_factor"
+        values["uses_maintenance_schedule"] = False
+        values["uses_programmed_outage_factor"] = True
+    else:
+        values["maintenance_mode"] = "unknown"
+        values["uses_maintenance_schedule"] = False
+        values["uses_programmed_outage_factor"] = False
+        warnings.append("USA CRON. MANTENIMIENTO is missing or has an unsupported value.")
     values["warnings"] = warnings
     return values

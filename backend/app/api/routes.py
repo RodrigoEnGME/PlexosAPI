@@ -1,6 +1,8 @@
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from statistics import mean, pstdev
 
 from fastapi import (
     APIRouter,
@@ -17,12 +19,27 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import (
+    AssetModification,
     Conversion,
     DatasetFile,
+    EnergyAsset,
     ImportRun,
     Project,
+    StudyAnalyticsJob,
+    StudyBus,
+    StudyBusDemand,
     StudyDescriptor,
+    StudyHourlyLoad,
+    StudyHydroDetail,
+    StudyHydroInflow,
+    StudyLoadLevelMap,
+    StudyMaintenance,
+    StudyProfileStatistic,
+    StudyRenewableHourlyProfile,
+    StudyRenewableProfile,
     StudyRevision,
+    StudySystem,
+    StudyThermalDetail,
     Tenant,
 )
 from app.schemas import (
@@ -38,10 +55,26 @@ from app.schemas import (
 )
 from app.services.encoding import detect_encoding
 from app.services.import_service import run_import_job
-from app.services.snapshot import effective_snapshot
+from app.services.snapshot import (
+    _maintenance_matches,
+    _maintenance_value_is_valid,
+    _modification_applies,
+    _stage_date,
+    effective_snapshot,
+)
 from app.settings import settings
 
 router = APIRouter()
+
+
+def _profile_stats(values: list[float]) -> dict[str, float | int]:
+    ordered = sorted(values)
+    def percentile(fraction: float) -> float:
+        position = (len(ordered) - 1) * fraction
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+    return {"mean": mean(values), "p10": percentile(.1), "p90": percentile(.9), "min": ordered[0], "max": ordered[-1], "stddev": pstdev(values), "valid_count": len(values)}
 
 
 def tenant_from_header(x_tenant_id: int | None = Header(default=None)) -> int:
@@ -270,6 +303,7 @@ def list_visual_entities(
             "technology": item["technology"] or item["asset_type"],
             "bus": int(item["bus_code"]) if item.get("bus_code") and str(item["bus_code"]).isdigit() else None,
             "capacity_mw": item["capacity_mw"], "operating_factor": item["operating_factor"],
+            "technical_details": item.get("technical_details"),
             "lifecycle_status": item["lifecycle_status"],
             "is_active": item["is_active"],
             "modifications": item["modifications"],
@@ -304,3 +338,444 @@ def get_snapshot(
     if revision is None:
         raise HTTPException(status_code=404, detail="Active study revision not found")
     return effective_snapshot(revision, stage, block, db)
+
+
+@router.get("/projects/{project_id}/buses/{bus_code}/demand", tags=["visualizer"])
+def get_bus_demand(
+    project_id: int,
+    bus_code: str,
+    date: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    block: int | None = None,
+    demand_code: str | None = None,
+    tenant_id: int = Depends(tenant_from_header),
+    db: Session = Depends(get_db),  # noqa: B008
+):
+    """Return the authoritative DBF block curve as-of a selected date.
+
+    DBF is kept explicit here: DEME is aggregate and DBUS is a fallback
+    snapshot value, so neither is silently mixed into a bus-level curve.
+    """
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    revision = db.scalar(select(StudyRevision).where(
+        StudyRevision.project_id == project_id,
+        StudyRevision.is_active.is_(True),
+    ).order_by(StudyRevision.revision_number.desc()))
+    bus = db.scalar(select(StudyBus).where(StudyBus.revision_id == (revision.id if revision else -1), StudyBus.source_code == bus_code))
+    if project is None or revision is None or bus is None:
+        raise HTTPException(status_code=404, detail="Bus not found")
+
+    query = select(StudyBusDemand).where(
+        StudyBusDemand.revision_id == revision.id,
+        StudyBusDemand.bus_code == bus_code,
+    )
+    all_rows = list(db.scalars(query.order_by(StudyBusDemand.effective_date, StudyBusDemand.block)))
+    available_dates = sorted({row.effective_date.date().isoformat() for row in all_rows})
+    available_blocks = sorted({row.block for row in all_rows})
+    demand_codes = sorted({row.demand_code for row in all_rows})
+    if year is not None:
+        all_rows = [row for row in all_rows if row.effective_date.year == year]
+    if month is not None:
+        all_rows = [row for row in all_rows if row.effective_date.month == month]
+    if block is not None:
+        all_rows = [row for row in all_rows if row.block == block]
+    if demand_code is not None:
+        all_rows = [row for row in all_rows if row.demand_code == demand_code]
+
+    selected_date: datetime | None = None
+    requested_date: datetime | None = None
+    if date:
+        try:
+            requested_date = datetime.fromisoformat(date).replace(tzinfo=None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="date must use ISO format YYYY-MM-DD") from exc
+        selected_date = max((row.effective_date for row in all_rows if row.effective_date <= requested_date), default=None)
+    elif all_rows:
+        selected_date = max(row.effective_date for row in all_rows)
+    if selected_date is not None:
+        all_rows = [row for row in all_rows if row.effective_date == selected_date]
+
+    records = [
+        {
+            "bus_code": row.bus_code,
+            "demand_code": row.demand_code,
+            "effective_date": row.effective_date.date().isoformat(),
+            "block": row.block,
+            "demand_mw": row.demand_mw,
+            "source_file": row.source_file,
+            "source_line": row.source_line,
+            "value_kind": "input",
+        }
+        for row in sorted(all_rows, key=lambda item: item.block)
+    ]
+    warnings = []
+    if not records:
+        fallback = json.loads(bus.demand_block_mw_json or "{}")
+        if fallback:
+            records = [
+                {"bus_code": bus_code, "demand_code": None, "effective_date": None, "block": int(key), "demand_mw": value, "source_file": bus.source_file, "source_line": bus.source_line, "value_kind": "input"}
+                for key, value in sorted(fallback.items(), key=lambda item: int(item[0]))
+            ]
+            warnings.append("DBF demand is unavailable; values come from DBUS embedded block fields.")
+        else:
+            warnings.append("No DBF or DBUS demand value is available for this bus and filter.")
+    hourly_series = []
+    hourly_formula = None
+    target_date = requested_date or selected_date
+    system = db.get(StudySystem, bus.system_id) if bus.system_id else None
+    if target_date and system:
+        hourly_rows = list(db.scalars(select(StudyHourlyLoad).where(
+            StudyHourlyLoad.revision_id == revision.id,
+            StudyHourlyLoad.year == target_date.year,
+            StudyHourlyLoad.month == target_date.month,
+        ).order_by(StudyHourlyLoad.hour)))
+        level_rows = list(db.scalars(select(StudyLoadLevelMap).where(
+            StudyLoadLevelMap.revision_id == revision.id,
+            StudyLoadLevelMap.month == target_date.month,
+        )))
+        level_by_hour = {row.hour: row.load_level for row in level_rows}
+        load_values = {(row.load_code.casefold(), row.hour): row.value_mw for row in hourly_rows}
+        load_codes = {row.load_code.casefold() for row in hourly_rows}
+        direct_load = bus.name.casefold() in load_codes and bus.name.casefold() != system.name.casefold()
+        system_bus_codes = [row.source_code for row in db.scalars(select(StudyBus).where(StudyBus.revision_id == revision.id, StudyBus.system_id == bus.system_id))]
+        bus_names = {row.source_code: row.name for row in db.scalars(select(StudyBus).where(StudyBus.revision_id == revision.id, StudyBus.system_id == bus.system_id))}
+        weight_rows = list(db.scalars(select(StudyBusDemand).where(StudyBusDemand.revision_id == revision.id, StudyBusDemand.bus_code.in_(system_bus_codes))))
+        latest_weights: dict[tuple[str, int], tuple[datetime, float]] = {}
+        for row in weight_rows:
+            key = (row.bus_code, row.block)
+            current = latest_weights.get(key)
+            if current is None or row.effective_date >= current[0]:
+                latest_weights[key] = (row.effective_date, float(row.demand_mw or 0))
+        for raw_hour in range((target_date.day - 1) * 24 + 1, target_date.day * 24 + 1):
+            load_level = level_by_hour.get(raw_hour)
+            if load_level is None or (block is not None and load_level != block):
+                continue
+            if direct_load:
+                value = load_values.get((bus.name.casefold(), raw_hour))
+                hourly_formula = "HRLOAD direct load column by node"
+            else:
+                aggregate = load_values.get((system.name.casefold(), raw_hour))
+                excluded = {name.casefold() for code, name in bus_names.items() if name.casefold() in load_codes and name.casefold() != system.name.casefold()}
+                denominator = sum(value for (code, level), (_, value) in latest_weights.items() if level == load_level and bus_names.get(code, "").casefold() not in excluded)
+                numerator = latest_weights.get((bus_code, load_level), (None, 0))[1]
+                value = aggregate * numerator / denominator if aggregate is not None and denominator else None
+                hourly_formula = "HRLOAD aggregate × DBF block weight / non-elastic DBF block total"
+            if value is not None:
+                hourly_series.append({"period": raw_hour - (target_date.day - 1) * 24, "source_hour": raw_hour, "load_level": load_level, "demand_mw": value, "value_kind": "derived"})
+        if not hourly_series:
+            warnings.append("HRLOAD/HRBMAP hourly curve is unavailable for the selected year, month, node or block.")
+    elif target_date:
+        warnings.append("Hourly demand requires a resolved system and HRLOAD/HRBMAP inputs.")
+    return {
+        "bus_code": bus_code,
+        "bus_name": bus.name,
+        "authority": "DBF" if any(row["source_file"].lower().startswith("dbf") for row in records) else "DBUS" if records else None,
+        "selected_date": selected_date.date().isoformat() if selected_date else None,
+        "curve_date": target_date.date().isoformat() if target_date else None,
+        "available_dates": available_dates,
+        "available_blocks": available_blocks,
+        "demand_codes": demand_codes,
+        "hourly_series": hourly_series,
+        "hourly_formula": hourly_formula,
+        "records": records,
+        "summary": {
+            "total_mw": sum(float(row["demand_mw"] or 0) for row in records),
+            "peak_mw": max((float(row["demand_mw"] or 0) for row in records), default=0),
+            "block_count": len(records),
+        },
+        "warnings": warnings,
+        "provenance": "StudyBusDemand / DBF input records; DBUS only as explicit fallback",
+    }
+
+
+@router.get("/projects/{project_id}/entities/{source_code}/history", tags=["visualizer"])
+def get_entity_history(
+    project_id: int,
+    source_code: str,
+    block: int | None = 1,
+    tenant_id: int = Depends(tenant_from_header),
+    db: Session = Depends(get_db),  # noqa: B008
+):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    revision = db.scalar(select(StudyRevision).where(
+        StudyRevision.project_id == project_id,
+        StudyRevision.is_active.is_(True),
+    ).order_by(StudyRevision.revision_number.desc()))
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Active study revision not found")
+    descriptor = db.scalar(select(StudyDescriptor).where(StudyDescriptor.revision_id == revision.id))
+    metadata = json.loads(descriptor.descriptor_json) if descriptor else {}
+    stages = int(metadata.get("numero de etapas", 0) or 0)
+    if stages < 1:
+        raise HTTPException(status_code=422, detail="Study has no temporal stages")
+    history = []
+    for stage in range(1, stages + 1):
+        snapshot = effective_snapshot(revision, stage, block, db)
+        entity = next((item for item in snapshot["entities"] if item["source_code"] == source_code), None)
+        if entity is not None:
+            history.append({
+                "stage": stage,
+                "as_of": snapshot["as_of"],
+                "lifecycle_status": entity["lifecycle_status"],
+                "is_active": entity["is_active"],
+                "capacity_installed_mw": entity.get("capacity_installed_mw"),
+                "capacity_maximum_mw": entity.get("capacity_maximum_mw"),
+                "capacity_available_mw": entity.get("capacity_available_mw"),
+                "maintenance_value": entity.get("maintenance_value"),
+                "maintenance_type": entity.get("maintenance_type"),
+                "maintenance_unit": entity.get("maintenance_unit"),
+                "value_kind": "derived",
+            })
+    if not history:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return {"source_code": source_code, "frequency": "weekly" if metadata.get("etapa") == 1 else "monthly", "series": history, "provenance": "intermediate database snapshot"}
+
+
+@router.get("/projects/{project_id}/assets/{asset_id}/history", tags=["visualizer"])
+def get_asset_history(
+    project_id: int,
+    asset_id: int,
+    block: int | None = 1,
+    tenant_id: int = Depends(tenant_from_header),
+    db: Session = Depends(get_db),  # noqa: B008
+):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.project_id == project_id, StudyRevision.is_active.is_(True)).order_by(StudyRevision.revision_number.desc()))
+    asset = db.scalar(select(EnergyAsset).where(EnergyAsset.id == asset_id, EnergyAsset.revision_id == (revision.id if revision else -1)))
+    if project is None or revision is None or asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    descriptor = db.scalar(select(StudyDescriptor).where(StudyDescriptor.revision_id == revision.id))
+    metadata = json.loads(descriptor.descriptor_json) if descriptor else {}
+    initial_year = int(metadata.get("ano inicial", 2023))
+    stages = int(metadata.get("numero de etapas", 0) or 0)
+    weekly = metadata.get("etapa") == 1
+    maintenance_mode = metadata.get("maintenance_mode")
+    modifications = [item for item in db.scalars(select(AssetModification).where(AssetModification.revision_id == revision.id, AssetModification.entity_type == asset.asset_type, AssetModification.source_code == asset.source_code).order_by(AssetModification.effective_date, AssetModification.sequence)) if _modification_applies(asset.name, item)]
+    maintenances = list(db.scalars(select(StudyMaintenance).where(StudyMaintenance.revision_id == revision.id, StudyMaintenance.asset_type == asset.asset_type, StudyMaintenance.source_code == asset.source_code)))
+    detail = None
+    if asset.asset_type == "thermal":
+        detail = db.scalar(select(StudyThermalDetail).where(StudyThermalDetail.revision_id == revision.id, StudyThermalDetail.source_code == asset.source_code))
+    elif asset.asset_type == "hydro":
+        detail = db.scalar(select(StudyHydroDetail).where(StudyHydroDetail.revision_id == revision.id, StudyHydroDetail.source_code == asset.source_code))
+    current_capacity = asset.capacity_mw or 0.0
+    operating_factor = asset.operating_factor
+    lifecycle = asset.lifecycle_status
+    series = []
+    for stage in range(1, stages + 1):
+        date = _stage_date(stage, initial_year)
+        stage_events = []
+        comparison_date = date.replace(tzinfo=None)
+        for event in [item for item in modifications if item.effective_date and item.effective_date <= comparison_date]:
+            payload = json.loads(event.changed_fields_json)
+            if payload.get("capacity") is not None:
+                current_capacity = float(payload["capacity"])
+            if payload.get("factor") is not None:
+                operating_factor = float(payload["factor"])
+            if payload.get("existing") is not None:
+                lifecycle = "future" if str(payload["existing"]) == "1" else "existing"
+            if payload.get("plant_type") is not None:
+                lifecycle = "future" if str(payload["plant_type"]) == "1" else "existing"
+            if event.effective_date.date() == date.date():
+                stage_events.append({"kind": "modification", "source_file": event.source_file, "source_line": event.source_line, "effective_date": event.effective_date.date().isoformat(), "fields": payload})
+        # Dated capacity changes alter the installed capacity for this stage;
+        # maintenance and outage factors are applied to that effective value.
+        maximum = float(current_capacity or getattr(detail, "max_generation_mw", None) or 0.0)
+        outage = 0 if maintenance_mode == "schedule" else max(
+            float(getattr(detail, "short_term_outage_pct", None) or 0),
+            float(getattr(detail, "historical_outage_pct", None) or 0),
+        )
+        available = maximum * max(0, 1 - outage / 100)
+        stage_index = stage if weekly else date.month
+        matching = [item for item in maintenances if item.year == date.year and (not item.asset_name or _maintenance_matches(asset.name, item.asset_name))]
+        maintenance_value = None
+        maintenance_item = matching[-1] if matching else None
+        if maintenance_item:
+            values = json.loads(maintenance_item.stage_values_json)
+            maintenance_value = values[stage_index - 1] if len(values) >= stage_index else None
+        maintenance_type = maintenance_item.measure_type if maintenance_item else None
+        maintenance_unit = maintenance_item.unit_type if maintenance_item else None
+        if maintenance_item and maintenance_value is not None:
+            value = float(maintenance_value)
+            valid_maintenance = _maintenance_value_is_valid(value, maintenance_unit or 0, {"unit_count": getattr(detail, "unit_count", None)})
+            if valid_maintenance and maintenance_type == 2:
+                available = maximum * value / 100 if maintenance_unit == 2 else value if maintenance_unit == 3 else maximum * max(0, min(1, value / max(1, getattr(detail, "unit_count", None) or 1)))
+            elif valid_maintenance and maintenance_type == 1:
+                reduction = maximum * value / 100 if maintenance_unit == 2 else value if maintenance_unit == 3 else maximum * min(1, value / max(1, getattr(detail, "unit_count", None) or 1))
+                available = max(0, available - reduction)
+            event = {"kind": "maintenance", "source_file": maintenance_item.source_file, "source_line": maintenance_item.source_line, "effective_date": date.date().isoformat(), "value": maintenance_value, "measure_type": maintenance_type, "unit_type": maintenance_unit}
+            if not valid_maintenance:
+                event["warning"] = "Maintenance value is incompatible with the declared unit count and was not applied."
+            stage_events.append(event)
+        series.append({"stage": stage, "as_of": date.date().isoformat(), "year": date.year, "month": date.month, "lifecycle_status": lifecycle, "is_active": lifecycle == "existing" and current_capacity > 0, "capacity_installed_mw": current_capacity, "capacity_maximum_mw": maximum, "capacity_available_mw": available if lifecycle == "existing" else 0, "operating_factor": operating_factor, "maintenance_value": maintenance_value, "maintenance_type": maintenance_type, "maintenance_unit": maintenance_unit, "events": stage_events, "value_kind": "derived"})
+    return {"asset_id": asset_id, "frequency": "weekly" if weekly else "monthly", "series": series, "provenance": "targeted intermediate database history"}
+
+
+@router.get("/projects/{project_id}/renewable-profiles/{source_code}/statistics", tags=["visualizer"])
+def get_renewable_profile_statistics(
+    project_id: int,
+    source_code: str,
+    stage: int | None = None,
+    block: int | None = None,
+    tenant_id: int = Depends(tenant_from_header),
+    db: Session = Depends(get_db),  # noqa: B008
+):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.project_id == project_id, StudyRevision.is_active.is_(True)).order_by(StudyRevision.revision_number.desc()))
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Active study revision not found")
+    query = select(StudyRenewableProfile).where(StudyRenewableProfile.revision_id == revision.id, StudyRenewableProfile.source_code == source_code)
+    if stage is not None:
+        query = query.where(StudyRenewableProfile.stage == stage)
+    if block is not None:
+        query = query.where(StudyRenewableProfile.block == block)
+    values = [item.value_pu for item in db.scalars(query)]
+    if not values:
+        raise HTTPException(status_code=404, detail="Renewable input profile not found")
+    ordered = sorted(values)
+    def percentile(fraction: float) -> float:
+        position = (len(ordered) - 1) * fraction
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+    return {"source_code": source_code, "unit": "p.u.", "value_kind": "derived", "statistics": {"mean": mean(values), "p10": percentile(0.10), "p90": percentile(0.90), "min": ordered[0], "max": ordered[-1], "stddev": pstdev(values), "valid_count": len(values)}, "filters": {"stage": stage, "block": block}, "provenance": "derived from persisted renewable input profiles"}
+
+
+@router.get("/projects/{project_id}/renewable-hourly/{source_code}/statistics", tags=["visualizer"])
+def get_renewable_hourly_statistics(
+    project_id: int,
+    source_code: str,
+    month: int | None = None,
+    scenario: int | None = None,
+    tenant_id: int = Depends(tenant_from_header),
+    db: Session = Depends(get_db),  # noqa: B008
+):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.project_id == project_id, StudyRevision.is_active.is_(True)).order_by(StudyRevision.revision_number.desc()))
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Active study revision not found")
+    asset = db.scalar(select(EnergyAsset).where(EnergyAsset.revision_id == revision.id, EnergyAsset.source_code == source_code))
+    profile_codes = {source_code}
+    if asset:
+        profile_codes.update({asset.name, asset.name.replace(" ", "_")})
+    query = select(StudyRenewableHourlyProfile).where(StudyRenewableHourlyProfile.revision_id == revision.id, StudyRenewableHourlyProfile.source_code.in_(profile_codes))
+    if month is not None:
+        query = query.where(StudyRenewableHourlyProfile.month == month)
+    if scenario is not None:
+        query = query.where(StudyRenewableHourlyProfile.scenario == scenario)
+    grouped: dict[int, list[float]] = {}
+    for item in db.scalars(query):
+        grouped.setdefault(item.hour, []).append(item.value_pu)
+    if not grouped:
+        raise HTTPException(status_code=404, detail="Renewable hourly input profile not found")
+    def stats(values: list[float]) -> dict[str, float | int]:
+        ordered = sorted(values)
+        def percentile(fraction: float) -> float:
+            position = (len(ordered) - 1) * fraction
+            lower = int(position)
+            upper = min(lower + 1, len(ordered) - 1)
+            return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+        return {"mean": mean(values), "p10": percentile(.1), "p90": percentile(.9), "min": ordered[0], "max": ordered[-1], "stddev": pstdev(values), "valid_count": len(values)}
+    return {"source_code": source_code, "unit": "p.u.", "grouping": "hour-of-day", "value_kind": "derived", "series": [{"hour": hour, **stats(values)} for hour, values in sorted(grouped.items())], "filters": {"month": month, "scenario": scenario}, "provenance": "derived from persisted renewable hourly input profiles"}
+
+
+@router.get("/projects/{project_id}/assets/{asset_id}/profile-statistics", tags=["visualizer"])
+def get_asset_profile_statistics(
+    project_id: int,
+    asset_id: int,
+    month: int | None = None,
+    scenario: int | None = None,
+    tenant_id: int = Depends(tenant_from_header),
+    db: Session = Depends(get_db),  # noqa: B008
+):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.project_id == project_id, StudyRevision.is_active.is_(True)).order_by(StudyRevision.revision_number.desc()))
+    asset = db.scalar(select(EnergyAsset).where(EnergyAsset.id == asset_id, EnergyAsset.revision_id == (revision.id if revision else -1)))
+    if revision is None or asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    job = db.scalar(select(StudyAnalyticsJob).where(StudyAnalyticsJob.revision_id == revision.id))
+    if job and job.status in {"pending", "running"}:
+        return {"asset_id": asset_id, "status": job.status, "progress": job.progress, "processed_assets": job.processed_assets, "total_assets": job.total_assets}
+    if job and job.status == "failed":
+        return {"asset_id": asset_id, "status": "failed", "error": job.error_message}
+    kind = "hydro-monthly" if asset.asset_type == "hydro" else "renewable-daily"
+    rows = list(db.scalars(select(StudyProfileStatistic).where(StudyProfileStatistic.revision_id == revision.id, StudyProfileStatistic.asset_id == asset.id, StudyProfileStatistic.profile_kind == kind).order_by(StudyProfileStatistic.bucket)))
+    if not rows:
+        message = "No hydro inflow series is linked to this generator." if kind == "hydro-monthly" else "No renewable profile series is linked to this generator."
+        return {"asset_id": asset_id, "status": "not-applicable", "source_code": asset.source_code, "series": [], "message": message}
+    series = []
+    warnings = []
+    for row in rows:
+        warning = None
+        if row.mean < row.p10 or row.mean > row.p90:
+            warning = "Mean is outside the empirical P10-P90 range; inspect skew or outliers."
+            if warning not in warnings:
+                warnings.append(warning)
+        series.append({
+            "month" if kind == "hydro-monthly" else "hour": row.bucket,
+            "mean": row.mean,
+            "p10": row.p10,
+            "p90": row.p90,
+            "min": row.minimum,
+            "max": row.maximum,
+            "stddev": row.standard_deviation,
+            "valid_count": row.valid_count,
+            "warning": warning,
+        })
+    return {"asset_id": asset_id, "status": "ready", "source_code": asset.source_code, "unit": rows[0].unit_name, "grouping": rows[0].grouping, "statistics": _profile_stats([row.mean for row in rows]), "series": series, "warnings": warnings, "value_kind": "derived", "provenance": f"{rows[0].source_file or 'input series'} · precalculated for revision {revision.id}"}
+
+
+@router.get("/projects/{project_id}/analytics/status", tags=["visualizer"])
+def get_analytics_status(
+    project_id: int,
+    tenant_id: int = Depends(tenant_from_header),
+    db: Session = Depends(get_db),  # noqa: B008
+):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.project_id == project_id, StudyRevision.is_active.is_(True)).order_by(StudyRevision.revision_number.desc()))
+    job = db.scalar(select(StudyAnalyticsJob).where(StudyAnalyticsJob.revision_id == (revision.id if revision else -1)))
+    if job is None:
+        return {"status": "not-started", "progress": 0, "processed_assets": 0, "total_assets": 0}
+    return {"status": job.status, "phase": job.phase, "progress": job.progress, "processed_assets": job.processed_assets, "total_assets": job.total_assets, "error": job.error_message}
+
+
+@router.get("/projects/{project_id}/hydro-inflows/{station_code}/statistics", tags=["visualizer"])
+def get_hydro_inflow_statistics(
+    project_id: int,
+    station_code: str,
+    db: Session = Depends(get_db),  # noqa: B008
+    tenant_id: int = Depends(tenant_from_header),
+):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.project_id == project_id, StudyRevision.is_active.is_(True)).order_by(StudyRevision.revision_number.desc()))
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Active study revision not found")
+    rows = list(db.scalars(select(StudyHydroInflow).where(StudyHydroInflow.revision_id == revision.id, StudyHydroInflow.station_code == station_code, StudyHydroInflow.is_missing.is_(False))))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Hydro inflow input series not found")
+    grouped: dict[int, list[float]] = {}
+    for row in rows:
+        if row.value_m3s is not None:
+            grouped.setdefault(row.month, []).append(row.value_m3s)
+    def stats(values: list[float]) -> dict[str, float | int]:
+        ordered = sorted(values)
+        def percentile(fraction: float) -> float:
+            position = (len(ordered) - 1) * fraction
+            lower = int(position)
+            upper = min(lower + 1, len(ordered) - 1)
+            return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+        return {"mean": mean(values), "p10": percentile(.1), "p90": percentile(.9), "min": ordered[0], "max": ordered[-1], "stddev": pstdev(values), "valid_count": len(values)}
+    missing_rows = list(db.scalars(select(StudyHydroInflow).where(StudyHydroInflow.revision_id == revision.id, StudyHydroInflow.station_code == station_code, StudyHydroInflow.is_missing.is_(True))))
+    return {"station_code": station_code, "unit": "m3/s", "grouping": "month-of-year", "value_kind": "derived", "series": [{"month": month, **stats(values)} for month, values in sorted(grouped.items())], "missing_count": len(missing_rows), "provenance": "derived from persisted hydro input inflows"}

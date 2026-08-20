@@ -8,7 +8,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models import ImportRun, Project, StudyDescriptor, StudyRevision
+from app.models import ImportRun, Project, StudyAnalyticsJob, StudyDescriptor, StudyRevision
+from app.services.analytics import run_analytics_job
 from app.services.dataset_parser import import_folder
 from app.services.intermediate_model import _files, build_intermediate_model
 from app.services.study_descriptor import build_study_descriptor
@@ -122,10 +123,16 @@ def import_zip(*, archive: Path, project: Project, db: Session, artifact_root: P
         descriptor_payload = json.loads(descriptor_row[0]) if descriptor_row else {}
         expected_systems = descriptor_payload.get("numero de sistemas")
         if isinstance(expected_systems, int) and result["systems"] != expected_systems:
-            raise ValueError(
+            warning = (
                 f"Semantic mapping found {result['systems']} systems, "
                 f"but SDDP.DAT declares {expected_systems}."
             )
+            descriptor_payload.setdefault("warnings", []).append(warning)
+            descriptor_record = db.query(StudyDescriptor).filter(StudyDescriptor.revision_id == revision.id).first()
+            if descriptor_record:
+                descriptor_record.descriptor_json = json.dumps(descriptor_payload, ensure_ascii=False)
+                descriptor_record.warnings_json = json.dumps(descriptor_payload["warnings"], ensure_ascii=False)
+            _progress(run, phase="quality", progress=80, log=f"Warning: {warning}", db=db)
         expected_families = (
             _files(extracted, "ctermi*.dat")
             + _files(extracted, "chidro*.dat")
@@ -164,7 +171,12 @@ def run_import_job(*, run_id: int, project_id: int, archive: Path, artifact_root
             return
         with IMPORT_LOCK:
             _progress(run, phase="queued", progress=1, log="Importer lock acquired; processing one SQLite import at a time.", db=db)
-            import_zip(archive=archive, project=project, db=db, artifact_root=artifact_root, run=run)
+            revision = import_zip(archive=archive, project=project, db=db, artifact_root=artifact_root, run=run)
+            job = StudyAnalyticsJob(revision_id=revision.id, status="pending", phase="queued")
+            db.add(job)
+            db.commit()
+            analytics_thread = threading.Thread(target=run_analytics_job, args=(job.id,), daemon=True)
+            analytics_thread.start()
     except Exception:  # noqa: BLE001
         # import_zip persists the failure details for the polling endpoint.
         db.rollback()

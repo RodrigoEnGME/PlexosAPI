@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -171,6 +171,60 @@ class StudyDemand(Base):
     source_line: Mapped[int] = mapped_column(Integer)
 
 
+class StudyDemandDefinition(Base):
+    __tablename__ = "study_demand_definitions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    system_id: Mapped[int | None] = mapped_column(ForeignKey("study_systems.id"), nullable=True, index=True)
+    source_code: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    segment_count: Mapped[int] = mapped_column(Integer, default=0)
+    first_segment_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyFuel(Base):
+    __tablename__ = "study_fuels"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    system_id: Mapped[int | None] = mapped_column(ForeignKey("study_systems.id"), nullable=True, index=True)
+    source_code: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    unit_name: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    base_cost: Mapped[float | None] = mapped_column(nullable=True)
+    co2_factor: Mapped[float | None] = mapped_column(nullable=True)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyFuelPrice(Base):
+    __tablename__ = "study_fuel_prices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    fuel_code: Mapped[str] = mapped_column(String(40), index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    month: Mapped[int] = mapped_column(Integer, index=True)
+    price: Mapped[float] = mapped_column()
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyCurrency(Base):
+    __tablename__ = "study_currencies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    code: Mapped[str] = mapped_column(String(12), index=True)
+    conversion_to_reference: Mapped[float] = mapped_column()
+    is_reference: Mapped[bool] = mapped_column(default=False)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
 class StudyBusDemand(Base):
     __tablename__ = "study_bus_demands"
 
@@ -183,6 +237,35 @@ class StudyBusDemand(Base):
     demand_mw: Mapped[float] = mapped_column()
     source_file: Mapped[str] = mapped_column(String(255))
     source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyLoadLevelMap(Base):
+    __tablename__ = "study_load_level_maps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    month: Mapped[int] = mapped_column(Integer, index=True)
+    hour: Mapped[int] = mapped_column(Integer, index=True)
+    load_level: Mapped[int] = mapped_column(Integer, index=True)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+    __table_args__ = (UniqueConstraint("revision_id", "month", "hour", name="uq_load_level_map_hour"),)
+
+
+class StudyHourlyLoad(Base):
+    __tablename__ = "study_hourly_loads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    load_code: Mapped[str] = mapped_column(String(160), index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    month: Mapped[int] = mapped_column(Integer, index=True)
+    hour: Mapped[int] = mapped_column(Integer, index=True)
+    value_mw: Mapped[float] = mapped_column()
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+    __table_args__ = (Index("ix_hourly_load_revision_code_year_month_hour", "revision_id", "load_code", "year", "month", "hour"),)
 
 
 class StudyCircuit(Base):
@@ -220,6 +303,183 @@ class EnergyAsset(Base):
     source_file: Mapped[str] = mapped_column(String(255))
     source_line: Mapped[int] = mapped_column(Integer)
     revision: Mapped[StudyRevision] = relationship(back_populates="assets")
+
+
+class StudyThermalDetail(Base):
+    __tablename__ = "study_thermal_details"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    source_code: Mapped[str] = mapped_column(String(40), index=True)
+    unit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plant_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    min_generation_mw: Mapped[float | None] = mapped_column(nullable=True)
+    max_generation_mw: Mapped[float | None] = mapped_column(nullable=True)
+    short_term_outage_pct: Mapped[float | None] = mapped_column(nullable=True)
+    historical_outage_pct: Mapped[float | None] = mapped_column(nullable=True)
+    variable_om_cost: Mapped[float | None] = mapped_column(nullable=True)
+    fuel_code: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    consumption_segments_json: Mapped[str] = mapped_column(Text, default="[]")
+    alternative_fuels_json: Mapped[str] = mapped_column(Text, default="[]")
+    commitment_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    transport_cost: Mapped[float | None] = mapped_column(nullable=True)
+    startup_cost: Mapped[float | None] = mapped_column(nullable=True)
+    gas_system: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    combined_cycle_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    emission_factor: Mapped[float | None] = mapped_column(nullable=True)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyHydroDetail(Base):
+    __tablename__ = "study_hydro_details"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    source_code: Mapped[str] = mapped_column(String(40), index=True)
+    station_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    downstream_spill_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    downstream_turbine_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plant_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    production_factor: Mapped[float | None] = mapped_column(nullable=True)
+    min_turbine_flow: Mapped[float | None] = mapped_column(nullable=True)
+    max_turbine_flow: Mapped[float | None] = mapped_column(nullable=True)
+    min_volume_hm3: Mapped[float | None] = mapped_column(nullable=True)
+    max_volume_hm3: Mapped[float | None] = mapped_column(nullable=True)
+    initial_condition: Mapped[float | None] = mapped_column(nullable=True)
+    min_total_flow: Mapped[float | None] = mapped_column(nullable=True)
+    spill_mode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    short_term_outage_pct: Mapped[float | None] = mapped_column(nullable=True)
+    historical_outage_pct: Mapped[float | None] = mapped_column(nullable=True)
+    production_curve_json: Mapped[str] = mapped_column(Text, default="[]")
+    level_volume_curve_json: Mapped[str] = mapped_column(Text, default="[]")
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyRenewableDetail(Base):
+    __tablename__ = "study_renewable_details"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    source_code: Mapped[str] = mapped_column(String(40), index=True)
+    unit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plant_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    operating_factor: Mapped[float | None] = mapped_column(nullable=True)
+    failure_probability: Mapped[float | None] = mapped_column(nullable=True)
+    technology_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyRenewableProfile(Base):
+    __tablename__ = "study_renewable_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    source_code: Mapped[str] = mapped_column(String(40), index=True)
+    stage: Mapped[int] = mapped_column(Integer, index=True)
+    scenario: Mapped[int] = mapped_column(Integer, index=True)
+    block: Mapped[int] = mapped_column(Integer, index=True)
+    value_pu: Mapped[float] = mapped_column()
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyRenewableHourlyProfile(Base):
+    __tablename__ = "study_renewable_hourly_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    source_code: Mapped[str] = mapped_column(String(160), index=True)
+    scenario: Mapped[int] = mapped_column(Integer, index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    month: Mapped[int] = mapped_column(Integer, index=True)
+    hour: Mapped[int] = mapped_column(Integer, index=True)
+    value_pu: Mapped[float] = mapped_column()
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+    __table_args__ = (Index("ix_renewable_hourly_revision_source_month_scenario_hour", "revision_id", "source_code", "month", "scenario", "hour"),)
+
+
+class StudyRenewableAssignment(Base):
+    __tablename__ = "study_renewable_assignments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("energy_assets.id"), index=True)
+    site_code: Mapped[str] = mapped_column(String(40), index=True)
+    profile_code: Mapped[str] = mapped_column(String(160), index=True)
+    technology_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+    __table_args__ = (Index("ix_renewable_assignment_revision_asset", "revision_id", "asset_id"),)
+
+
+class StudyHydroStation(Base):
+    __tablename__ = "study_hydro_stations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    source_code: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    downstream_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    incremental_null: Mapped[bool] = mapped_column(default=False)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+
+
+class StudyHydroInflow(Base):
+    __tablename__ = "study_hydro_inflows"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    station_code: Mapped[str] = mapped_column(String(40), index=True)
+    month: Mapped[int] = mapped_column(Integer, index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    value_m3s: Mapped[float | None] = mapped_column(nullable=True)
+    is_missing: Mapped[bool] = mapped_column(default=False)
+    source_file: Mapped[str] = mapped_column(String(255))
+    source_line: Mapped[int] = mapped_column(Integer)
+    __table_args__ = (Index("ix_hydro_inflow_revision_station_missing_month", "revision_id", "station_code", "is_missing", "month"),)
+
+
+class StudyProfileStatistic(Base):
+    __tablename__ = "study_profile_statistics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), index=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("energy_assets.id"), index=True)
+    profile_kind: Mapped[str] = mapped_column(String(40), index=True)
+    grouping: Mapped[str] = mapped_column(String(40))
+    bucket: Mapped[int] = mapped_column(Integer)
+    mean: Mapped[float] = mapped_column()
+    p10: Mapped[float] = mapped_column()
+    p90: Mapped[float] = mapped_column()
+    minimum: Mapped[float] = mapped_column()
+    maximum: Mapped[float] = mapped_column()
+    standard_deviation: Mapped[float] = mapped_column()
+    valid_count: Mapped[int] = mapped_column(Integer)
+    unit_name: Mapped[str] = mapped_column(String(20))
+    source_file: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("revision_id", "asset_id", "profile_kind", "grouping", "bucket", name="uq_profile_statistic_bucket"),)
+
+
+class StudyAnalyticsJob(Base):
+    __tablename__ = "study_analytics_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("study_revisions.id"), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    phase: Mapped[str] = mapped_column(String(60), default="queued")
+    total_assets: Mapped[int] = mapped_column(Integer, default=0)
+    processed_assets: Mapped[int] = mapped_column(Integer, default=0)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AssetModification(Base):

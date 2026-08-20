@@ -5,12 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.db import init_db
+from app.services.analytics import recover_analytics_jobs
 from app.settings import settings
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    recover_analytics_jobs()
     yield
 
 

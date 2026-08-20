@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.settings import settings
@@ -37,18 +37,37 @@ def init_db() -> None:
         EnergyAsset,
         ImportRun,
         Project,
+        StudyAnalyticsJob,
         StudyBus,
         StudyBusDemand,
         StudyCircuit,
+        StudyCurrency,
         StudyDemand,
+        StudyDemandDefinition,
         StudyDescriptor,
+        StudyFuel,
+        StudyFuelPrice,
+        StudyHourlyLoad,
+        StudyHydroDetail,
+        StudyHydroInflow,
+        StudyHydroStation,
+        StudyLoadLevelMap,
         StudyMaintenance,
+        StudyProfileStatistic,
+        StudyRenewableAssignment,
+        StudyRenewableDetail,
+        StudyRenewableHourlyProfile,
+        StudyRenewableProfile,
         StudyRevision,
         StudySystem,
+        StudyThermalDetail,
         Tenant,
     )
 
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_renewable_hourly_revision_source_month_scenario_hour ON study_renewable_hourly_profiles (revision_id, source_code, month, scenario, hour)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_hydro_inflow_revision_station_missing_month ON study_hydro_inflows (revision_id, station_code, is_missing, month)"))
 
 
 def get_db() -> Generator[Session, None, None]:

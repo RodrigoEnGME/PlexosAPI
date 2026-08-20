@@ -2,7 +2,7 @@ from pathlib import Path
 
 from app.db import Base, SessionLocal, engine
 from app.models import DatasetFile, DatasetRecord, Project, Tenant
-from app.services.dataset_parser import import_folder, parse_sddp_control
+from app.services.dataset_parser import _classify, import_folder, parse_sddp_control
 
 
 def test_imports_text_and_binary_files(tmp_path: Path) -> None:
@@ -34,6 +34,7 @@ def test_parses_sddp_control_values(tmp_path: Path) -> None:
     control.write_text(
         "Uruguay\nIDIOMA                       1  0=ING; 1=ESP\n"
         "ETAPA                        2  1=SEMANAL; 2=MENSUAL\n"
+        "USA CRON. MANTENIMIENTO      1  0=USA IP; 1=USA CRONOG\n"
         "ANO INICIAL               2023\nNUMERO DE ETAPAS           228\n"
         "NUMERO DE SISTEMAS           1\nNUMERO DE SERIES            75\n"
         "NUMERO DE BLOQUES DEMANDA   21 1\n---------------- SISTEMAS --\n",
@@ -41,7 +42,16 @@ def test_parses_sddp_control_values(tmp_path: Path) -> None:
     )
     descriptor = parse_sddp_control(control)
     assert descriptor["idioma"] == 1
+    assert descriptor["language_code"] == "es"
     assert descriptor["etapa"] == 2
+    assert descriptor["maintenance_mode"] == "schedule"
+    assert descriptor["uses_maintenance_schedule"] is True
+    assert descriptor["uses_programmed_outage_factor"] is False
     assert descriptor["ano inicial"] == 2023
     assert descriptor["numero de etapas"] == 228
     assert descriptor["numero de bloques demanda"] == [21, 1]
+
+
+def test_classifies_utf16_sddp_control_as_text() -> None:
+    control = "Uruguay\nIDIOMA 1\nETAPA 2\nUSA CRON. MANTENIMIENTO 1\n"
+    assert _classify(Path("sddp.dat"), control.encode("utf-16")) == "control"

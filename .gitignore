@@ -94,6 +94,10 @@ frontend/dist/
 .opencode/dist/
 data/
 docs/
+!docs/
+docs/*
+!docs/sddp-manual.md
+!docs/sddp-format-catalog.md
 node_modules/
 Otros/
 Pruebas/

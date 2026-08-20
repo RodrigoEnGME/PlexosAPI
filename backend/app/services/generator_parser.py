@@ -22,7 +22,7 @@ LINE_RE = re.compile(
     r"^\s*(?P<date>\d{2}/\d{2}/\d{4})\s+"
     r"(?P<bus>\d+)\s+"
     r"(?P<name>.{1,20}?)\s+"
-    r"(?P<units>\d+)\s+\d+\s+"
+    r"(?:(?P<plant_type>\d+)\s+)?(?P<units>\d+)\s+"
     r"(?P<capacity>[-+\d.Ee]+)\s+"
     r"(?P<factor>[-+\d.Ee]+)"
 )

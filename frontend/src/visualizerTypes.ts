@@ -1,1 +1,32 @@
-export type Entity = { id: string; source_code: string; name: string; technology: string; asset_type: string; system_code?: string | null; bus?: number; capacity_mw: number | null; operating_factor?: number; source_file: string; source_line: number; latitude?: number | null; longitude?: number | null; coordinate_status?: string; lifecycle_status: string; is_active: boolean; modifications: { source_file: string; source_line: number; effective_date: string }[] };
+export type TechnicalDetails = {
+  kind: "thermal" | "hydro" | "renewable" | string;
+  source_file?: string;
+  source_line?: number;
+  [key: string]: unknown;
+};
+export type Entity = {
+  id: string;
+  source_code: string;
+  name: string;
+  technology: string;
+  asset_type: string;
+  system_code?: string | null;
+  bus?: number;
+  capacity_mw: number | null;
+  capacity_installed_mw?: number;
+  capacity_maximum_mw?: number;
+  capacity_available_mw?: number;
+  operating_factor?: number;
+  technical_details?: TechnicalDetails;
+  maintenance_value?: number | null;
+  maintenance_type?: number | null;
+  maintenance_unit?: number | null;
+  source_file: string;
+  source_line: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  coordinate_status?: string;
+  lifecycle_status: string;
+  is_active: boolean;
+  modifications: { source_file: string; source_line: number; effective_date: string }[];
+};

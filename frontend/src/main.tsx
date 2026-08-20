@@ -8,6 +8,20 @@ import {
   Tooltip,
   useMap,
 } from "react-leaflet";
+import {
+  Area,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip as ChartTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { divIcon } from "leaflet";
 import {
   Droplets,
@@ -95,6 +109,7 @@ type Snapshot = {
   entities: Entity[];
   buses: {
     source_code: string;
+    name: string;
     system_code?: string | null;
     nominal_voltage_kv?: number | null;
     demand_mw?: number;
@@ -115,7 +130,34 @@ type Snapshot = {
     system_code?: string | null;
     value_gwh: number | null;
   }[];
+  fuels?: { source_code: string; name: string; unit_name?: string | null; base_cost?: number | null; co2_factor?: number | null; source_file: string; source_line: number }[];
+  fuel_prices?: { fuel_code: string; year: number; month: number; price: number; source_file: string; source_line: number }[];
+  currencies?: { code: string; conversion_to_reference: number; is_reference: boolean; source_file: string; source_line: number }[];
   provenance: string;
+};
+type HistoryEvent = { kind: string; source_file: string; source_line: number; effective_date: string; value?: number; measure_type?: number; unit_type?: number; fields?: Record<string, unknown> };
+type EntityHistory = { stage: number; as_of: string; year?: number; month?: number; label?: string; lifecycle_status: string; is_active: boolean; capacity_installed_mw?: number; capacity_maximum_mw?: number; capacity_available_mw?: number; maintenance_value?: number | null; maintenance_type?: number | null; maintenance_unit?: number | null; events?: HistoryEvent[] };
+type HistoryFrequency = "monthly" | "weekly";
+type HistoryScale = "absolute" | "detail";
+type SummaryStats = { mean: number; p10: number; p90: number; min: number; max: number; stddev: number; valid_count: number };
+type ProfilePoint = { mean: number; p10: number; p90: number; min: number; max: number; stddev: number; valid_count: number; hour?: number; month?: number; warning?: string | null };
+type ProfileStats = { asset_id?: number; status?: "pending" | "running" | "ready" | "failed" | "not-applicable"; progress?: number; processed_assets?: number; total_assets?: number; source_code?: string; unit?: string; grouping?: string; statistics?: SummaryStats; series?: ProfilePoint[]; warnings?: string[]; missing_count?: number; filters?: { month?: number | null; scenario?: number | null; stage?: number | null; block?: number | null }; provenance?: string; error?: string; message?: string };
+type AnalyticsStatus = { status: "not-started" | "pending" | "running" | "ready" | "failed"; phase?: string; progress: number; processed_assets: number; total_assets: number; error?: string | null };
+type DemandProfile = {
+  bus_code: string;
+  bus_name: string;
+  authority: "DBF" | "DBUS" | null;
+  selected_date: string | null;
+  curve_date: string | null;
+  available_dates: string[];
+  available_blocks: number[];
+  demand_codes: string[];
+  records: { block: number; demand_mw: number | null; demand_code: string | null; effective_date: string | null; source_file: string; source_line: number; value_kind: "input" }[];
+  summary: { total_mw: number; peak_mw: number; block_count: number };
+  warnings: string[];
+  provenance: string;
+  hourly_series?: { period: number; source_hour: number; load_level: number; demand_mw: number; value_kind: "derived" }[];
+  hourly_formula?: string | null;
 };
 type Project = { id: number; name: string };
 type Revision = {
@@ -136,8 +178,131 @@ type ImportRun = {
   message: string | null;
 };
 type Placed = { entity: Entity; coordinates: MapCoordinates };
+
+function StatValue({ label, value, unit = "" }: { label: string; value: number | undefined; unit?: string }) {
+  return <span className="stat-value"><b>{value === undefined ? "—" : value.toFixed(2)}</b><small>{label}{unit ? ` · ${unit}` : ""}</small></span>;
+}
+
+function formatHistoryEvent(event: HistoryEvent): string {
+  if (event.kind === "modification") {
+    const capacity = event.fields?.capacity;
+    if (capacity !== undefined) return `Potencia instalada: ${String(capacity)} MW`;
+    const factor = event.fields?.factor;
+    if (factor !== undefined) return `Factor operativo: ${String(factor)}`;
+    return "Modificación de parámetros";
+  }
+  if (event.kind === "maintenance") {
+    const unit = event.unit_type === 1 ? "unidades" : event.unit_type === 2 ? "%" : event.unit_type === 3 ? "MW" : "unidades";
+    const mode = event.measure_type === 2 ? "disponibilidad" : "reducción";
+    return `Mantenimiento: ${mode} ${event.value ?? "—"} ${unit}`;
+  }
+  return "Cambio de entrada";
+}
+
+function CapacityHistoryChart({ history, fullHistory, frequency, scale }: { history: EntityHistory[]; fullHistory: EntityHistory[]; frequency: HistoryFrequency; scale: HistoryScale }) {
+  if (!history.length) return <p className="muted-copy">No capacity history is available for this generator.</p>;
+  const data = history.map((point) => ({
+    ...point,
+     label: new Intl.DateTimeFormat("es-AR", { month: "short", year: "2-digit", timeZone: "UTC" }).format(new Date(`${point.as_of}T00:00:00Z`)),
+    available: Number(point.capacity_available_mw ?? 0),
+  }));
+  const fullValues = fullHistory.map((point) => Number(point.capacity_available_mw ?? 0));
+  const minimum = Math.min(...fullValues);
+  const maximum = Math.max(...fullValues);
+  const padding = maximum === minimum ? Math.max(1, maximum * 0.1) : (maximum - minimum) * 0.1;
+  const scaleMagnitude = 10 ** Math.floor(Math.log10(Math.max(1, maximum)));
+  const scaleStep = scaleMagnitude / 2;
+  const absoluteMaximum = Math.max(scaleStep, Math.ceil(maximum / scaleStep) * scaleStep);
+  const domain = scale === "absolute"
+    ? [0, absoluteMaximum]
+    : [Math.max(0, minimum - padding), maximum + padding];
+  return <div className="capacity-history-chart" role="img" aria-label="Capacity availability by stage">
+    <ResponsiveContainer width="100%" height={190}>
+      <BarChart data={data} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+        <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />
+        <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={{ stroke: "var(--line)" }} interval={Math.max(0, Math.ceil(data.length / 6) - 1)} />
+        <YAxis domain={domain} allowDataOverflow={false} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={false} width={50} tickFormatter={(value: number) => `${value.toFixed(1)}`} />
+        <ChartTooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text)", fontFamily: "DM Mono", fontSize: 11 }} labelFormatter={(_, payload) => { const point = payload?.[0]?.payload as EntityHistory | undefined; return point ? `${point.label ?? point.as_of} · Month ${point.stage}` : "Capacity"; }} formatter={(value) => [`${typeof value === "number" ? value.toFixed(3) : "—"} MW`, "Available"]} />
+        <Bar dataKey="available" name="available" maxBarSize={18}>
+          {data.map((point) => <Cell key={point.stage} fill={point.events?.length ? "var(--chart-p90)" : "var(--accent)"} />)}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+     <div className="profile-chart-caption"><span>Available MW · {frequency === "weekly" ? "calendar week" : "calendar month"}</span><span>{scale === "absolute" ? "Absolute scale · 0 MW baseline" : "Detail scale · cropped axis"} · {minimum.toFixed(3)}–{maximum.toFixed(3)} MW</span></div>
+   </div>;
+}
+
+function ProfileChart({ profile }: { profile: ProfileStats }) {
+  const points = profile.series ?? [];
+  const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  if (!points.length) return null;
+  const chartData = points.map((point) => ({
+    ...point,
+    label: point.month ? monthLabels[point.month - 1] : String(point.hour).padStart(2, "0"),
+    bandBase: point.p10,
+    bandWidth: Math.max(0, point.p90 - point.p10),
+  }));
+  return <div className="profile-chart" role="img" aria-label={`${profile.grouping ?? "profile"} statistics`}>
+    <ResponsiveContainer width="100%" height={240}>
+      <LineChart data={chartData} margin={{ top: 8, right: 14, bottom: 4, left: 0 }}>
+        <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />
+        <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={{ stroke: "var(--line)" }} interval={points.length > 12 ? 3 : 0} />
+        <YAxis tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={false} width={42} tickFormatter={(value: number) => value.toFixed(1)} />
+        <ChartTooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text)", fontFamily: "DM Mono", fontSize: 11 }} labelFormatter={(_, payload) => { const point = payload?.[0]?.payload as (typeof chartData)[number] | undefined; return point ? `${point.label} · n=${point.valid_count}${point.warning ? " · skew/outlier warning" : ""}` : "Profile"; }} formatter={(value, name) => [typeof value === "number" ? value.toFixed(2) : String(value ?? "—"), String(name)]} />
+        <Legend wrapperStyle={{ color: "var(--muted)", fontFamily: "DM Mono", fontSize: 10 }} />
+        <Area dataKey="bandBase" stackId="confidence" stroke="none" fill="transparent" legendType="none" tooltipType="none" />
+        <Area dataKey="bandWidth" stackId="confidence" stroke="none" fill="var(--accent)" fillOpacity={0.18} legendType="none" name="P10-P90" />
+        <Line type="monotone" dataKey="p10" name="P10" stroke="var(--chart-p10)" strokeDasharray="5 4" strokeWidth={1.5} dot={false} />
+        <Line type="monotone" dataKey="mean" name="Mean" stroke="var(--accent)" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+        <Line type="monotone" dataKey="p90" name="P90" stroke="var(--chart-p90)" strokeDasharray="5 4" strokeWidth={1.5} dot={false} />
+      </LineChart>
+    </ResponsiveContainer>
+     <div className="profile-chart-caption"><span>{profile.grouping === "month-of-year" ? "month" : profile.grouping}</span><span>P10-P90 empirical band</span></div>
+  </div>;
+}
+
+function ProfileStatsPanel({ profile, status, technology }: { profile: ProfileStats | null; status: "idle" | "loading" | "ready" | "empty" | "error"; technology: string }) {
+  return <section className="profile-panel" aria-live="polite">
+    <div className="panel-section-head"><span className="eyebrow">INPUT PROFILE</span><strong>{technology === "hydro" ? "Typical hydrograph" : "Typical renewable profile"}</strong></div>
+    {status === "loading" && <p className="muted-copy">Gráficas aún no disponibles. Se están generando en segundo plano{profile?.progress !== undefined ? ` · ${profile.progress}%` : ""}.</p>}
+    {status === "empty" && <p className="muted-copy">{profile?.message ?? "No compatible input series is linked to this generator."}</p>}
+    {status === "error" && <p className="error-copy">Statistics could not be loaded. The source may be unavailable or the request failed.</p>}
+     {profile?.statistics && <div className="stats-grid"><StatValue label="mean" value={profile.statistics.mean} unit={profile.unit} /><StatValue label="P10" value={profile.statistics.p10} /><StatValue label="P90" value={profile.statistics.p90} /><StatValue label="min" value={profile.statistics.min} /><StatValue label="max" value={profile.statistics.max} /><StatValue label="buckets" value={profile.statistics.valid_count} /></div>}
+     {profile?.series && <ProfileChart profile={profile} />}
+     {profile?.warnings?.map((warning) => <small className="profile-warning" key={warning}>{warning}</small>)}
+    {profile && <small className="provenance-line">{profile.provenance ?? "Statistics are precalculated for this revision."}{profile.missing_count ? ` · ${profile.missing_count} missing` : ""}</small>}
+  </section>;
+}
+
+function DemandCurveChart({ profile }: { profile: DemandProfile }) {
+  if (profile.hourly_series?.length) {
+    return <div className="demand-chart" role="img" aria-label={`Hourly demand curve for bus ${profile.bus_code}`}><ResponsiveContainer width="100%" height={190}><LineChart data={profile.hourly_series} margin={{ top: 8, right: 8, bottom: 4, left: 0 }}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} /><XAxis dataKey="period" tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={{ stroke: "var(--line)" }} /><YAxis tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={false} width={42} /><ChartTooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text)", fontFamily: "DM Mono", fontSize: 11 }} formatter={(value) => [typeof value === "number" ? `${value.toFixed(2)} MW` : String(value ?? "—"), "Demand"]} /><Line type="monotone" dataKey="demand_mw" name="Demand MW" stroke="var(--accent)" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} /></LineChart></ResponsiveContainer></div>;
+  }
+  return <div className="demand-chart" role="img" aria-label={`Block demand curve for bus ${profile.bus_code}`}><ResponsiveContainer width="100%" height={190}><BarChart data={profile.records} margin={{ top: 8, right: 8, bottom: 4, left: 0 }}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} /><XAxis dataKey="block" tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={{ stroke: "var(--line)" }} /><YAxis tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={false} width={42} /><ChartTooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text)", fontFamily: "DM Mono", fontSize: 11 }} formatter={(value) => [typeof value === "number" ? `${value.toFixed(2)} MW` : String(value ?? "—"), "Demand"]} /><Bar dataKey="demand_mw" name="Demand MW" fill="var(--accent)" radius={[2, 2, 0, 0]} /></BarChart></ResponsiveContainer></div>;
+}
+
+function DemandProfilePanel({ profile, status, date, block, demandCode, onDateChange, onBlockChange, onDemandCodeChange }: { profile: DemandProfile | null; status: "idle" | "loading" | "ready" | "empty" | "error"; date: string; block: string; demandCode: string; onDateChange: (value: string) => void; onBlockChange: (value: string) => void; onDemandCodeChange: (value: string) => void }) {
+  return <section className="demand-profile-panel" aria-live="polite">
+    <div className="panel-section-head"><span className="eyebrow">NODE DEMAND</span><strong>{profile?.hourly_series?.length ? "HOURLY / HRBMAP" : profile?.authority ?? "—"}</strong></div>
+    <div className="demand-profile-controls">
+      <label htmlFor="demand-date">AS OF <input id="demand-date" type="date" value={date} onChange={(event) => onDateChange(event.target.value)} /></label>
+      <label htmlFor="demand-block">BLOCK <select id="demand-block" value={block} onChange={(event) => onBlockChange(event.target.value)}><option value="all">All</option>{(profile?.available_blocks ?? []).map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+      <label htmlFor="demand-code">LOAD <select id="demand-code" value={demandCode} onChange={(event) => onDemandCodeChange(event.target.value)}><option value="all">All</option>{(profile?.demand_codes ?? []).map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+      {profile?.curve_date && <span>Curve date <b>{profile.curve_date}</b></span>}
+    </div>
+    {status === "loading" && <p className="muted-copy">Loading block demand curve...</p>}
+    {status === "empty" && <p className="muted-copy">No demand record is available for this node and date.</p>}
+    {status === "error" && <p className="error-copy">Demand curve could not be loaded.</p>}
+    {profile && profile.records.length > 0 && <>
+      <div className="demand-summary"><span><b>{profile.summary.peak_mw.toFixed(2)}</b><small>peak MW</small></span><span><b>{profile.summary.total_mw.toFixed(2)}</b><small>sum of blocks</small></span><span><b>{profile.summary.block_count}</b><small>blocks</small></span></div>
+      <DemandCurveChart profile={profile} />
+      <small className="provenance-line">{profile.hourly_formula ? `${profile.hourly_formula}. ` : ""}{profile.provenance}{profile.warnings.length ? ` · ${profile.warnings.join(" ")}` : ""}</small>
+    </>}
+  </section>;
+}
 type NodeGroup = {
   key: string;
+  busCode: string | null;
   coordinates: [number, number];
   items: Placed[];
 };
@@ -176,7 +341,7 @@ const technologyMeta: Record<
   unknown: { label: "Generator", color: "#7D919E", Icon: Zap },
   battery: { label: "Battery", color: "#C58B35", Icon: Battery },
 };
-const apiBase = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const apiBase = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? "" : "http://127.0.0.1:8000");
 const tenantId = import.meta.env.VITE_TENANT_ID ?? "1";
 const configuredProjectId = import.meta.env.VITE_PROJECT_ID
   ? Number(import.meta.env.VITE_PROJECT_ID)
@@ -251,6 +416,22 @@ function App() {
   const [revisions, setRevisions] = useState<Revision[]>([]);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [selectedId, setSelectedId] = useState("");
+  const [selectedNodeBus, setSelectedNodeBus] = useState("");
+  const [nodeQuery, setNodeQuery] = useState("");
+  const [nodeSearchOpen, setNodeSearchOpen] = useState(false);
+  const [entityHistory, setEntityHistory] = useState<EntityHistory[]>([]);
+  const [historyError, setHistoryError] = useState("");
+  const [historyFrequency, setHistoryFrequency] = useState<HistoryFrequency>("monthly");
+  const [historyWindowSize, setHistoryWindowSize] = useState<60 | 120>(60);
+  const [historyScale, setHistoryScale] = useState<HistoryScale>("absolute");
+  const [historyWindowStart, setHistoryWindowStart] = useState(0);
+  const [profileStats, setProfileStats] = useState<ProfileStats | null>(null);
+  const [profileStatus, setProfileStatus] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
+  const [demandProfile, setDemandProfile] = useState<DemandProfile | null>(null);
+  const [demandProfileStatus, setDemandProfileStatus] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
+  const [demandDate, setDemandDate] = useState("");
+  const [demandBlockFilter, setDemandBlockFilter] = useState("all");
+  const [demandCodeFilter, setDemandCodeFilter] = useState("all");
   const [selectedSystem, setSelectedSystem] = useState("all");
   const [selectedVoltage, setSelectedVoltage] = useState("all");
   const [showDemandReferences, setShowDemandReferences] = useState(false);
@@ -272,11 +453,18 @@ function App() {
   );
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [openNode, setOpenNode] = useState<string | null>(null);
   const [importRun, setImportRun] = useState<ImportRun | null>(null);
+  const [revisionRefreshKey, setRevisionRefreshKey] = useState(0);
+  const [revisionRefreshPending, setRevisionRefreshPending] = useState(false);
+  const [lastRefreshedImportId, setLastRefreshedImportId] = useState<number | null>(null);
+  const [pipelineHydrating, setPipelineHydrating] = useState(false);
+  const [analyticsStatus, setAnalyticsStatus] = useState<AnalyticsStatus | null>(null);
+  const [analyticsError, setAnalyticsError] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const importActive = Boolean(importRun && !["completed", "failed"].includes(importRun.status));
+  const pipelineBusy = importActive || revisionRefreshPending || pipelineHydrating;
 
   useEffect(() => {
     localStorage.setItem("gme-theme", theme);
@@ -294,16 +482,62 @@ function App() {
   }, []);
   useEffect(() => {
     if (!projectId) return;
+    api<Revision[]>(`/api/projects/${projectId}/revisions`)
+      .then(setRevisions)
+      .catch(() => setRevisions([]));
+  }, [projectId]);
+  useEffect(() => {
+    if (!projectId) {
+      setImportRun(null);
+      setPipelineHydrating(false);
+      return;
+    }
+    setImportRun(null);
+    setPipelineHydrating(true);
+    api<ImportRun[]>(`/api/projects/${projectId}/imports`)
+      .then((runs) => {
+        const active = runs.find((run) => !["completed", "failed"].includes(run.status));
+        if (active) setImportRun(active);
+      })
+      .catch(() => undefined)
+      .finally(() => setPipelineHydrating(false));
+  }, [projectId]);
+  useEffect(() => {
+    if (!projectId || importActive || pipelineHydrating) {
+      setAnalyticsStatus(null);
+      setAnalyticsError("");
+      return;
+    }
+    const controller = new AbortController();
+    let timer: number | undefined;
+    setAnalyticsStatus(null);
+    setAnalyticsError("");
+    const load = () => api<AnalyticsStatus>(`/api/projects/${projectId}/analytics/status`, { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setAnalyticsStatus(result);
+        setAnalyticsError("");
+        if (result.status === "pending" || result.status === "running") timer = window.setTimeout(load, 1500);
+      })
+      .catch((reason: Error) => {
+        if (controller.signal.aborted) return;
+        setAnalyticsError(reason.message || "Analytics status unavailable.");
+      });
+    load();
+    return () => {
+      controller.abort();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [projectId, importActive, pipelineHydrating]);
+  useEffect(() => {
+    if (!projectId) return;
+    const controller = new AbortController();
     setStatus("loading");
-    Promise.all([
-      api<Snapshot>(
-        `/api/projects/${projectId}/snapshot?stage=${stage}&block=${block}`,
-      ),
-      api<Revision[]>(`/api/projects/${projectId}/revisions`),
-    ])
-      .then(([nextSnapshot, nextRevisions]) => {
+    api<Snapshot>(`/api/projects/${projectId}/snapshot?stage=${stage}&block=${block}`, { signal: controller.signal })
+      .then((nextSnapshot) => {
         setSnapshot(nextSnapshot);
-        setRevisions(nextRevisions);
+        setRevisionRefreshPending(false);
+        setDemandDate(nextSnapshot.as_of);
         setStatus("connected");
         setError("");
         setSelectedSystem((current) =>
@@ -312,15 +546,115 @@ function App() {
             ? current
             : "all",
         );
-        if (!nextSnapshot.entities.some((item) => item.id === selectedId))
-          setSelectedId(nextSnapshot.entities[0]?.id ?? "");
+        setSelectedId((current) => nextSnapshot.entities.some((item) => item.id === current) ? current : "");
+        setSelectedNodeBus((current) => {
+          if (current && nextSnapshot.buses.some((bus) => bus.source_code === current)) return current;
+          const byCapacity = nextSnapshot.entities.filter((item) => item.is_active && item.bus).reduce<{ bus_code: string; capacity: number } | null>((best, item) => {
+            const capacity = item.capacity_available_mw ?? item.capacity_mw ?? 0;
+            if (!best || capacity > best.capacity) return { bus_code: String(item.bus), capacity };
+            return best;
+          }, null);
+          return byCapacity?.bus_code ?? nextSnapshot.buses[0]?.source_code ?? "";
+        });
       })
       .catch((reason: Error) => {
+        if (controller.signal.aborted) return;
         setStatus("error");
         setError(reason.message);
-        setSnapshot(null);
       });
-  }, [projectId, stage, block]);
+    return () => controller.abort();
+  }, [projectId, stage, block, revisionRefreshKey]);
+  const selectedEntity = snapshot?.entities.find((item) => item.id === selectedId);
+  useEffect(() => {
+    if (pipelineBusy || !projectId || !selectedId) {
+      setEntityHistory([]);
+      setHistoryError("");
+      setHistoryFrequency("monthly");
+      setHistoryWindowStart(0);
+      return;
+    }
+    setHistoryWindowStart(0);
+    setHistoryError("");
+    const historyPath = `/api/projects/${projectId}/assets/${selectedId}/history?block=${block}`;
+    api<{ series: EntityHistory[]; frequency?: HistoryFrequency }>(historyPath)
+      .then((result) => {
+        setEntityHistory(result.series);
+        setHistoryError("");
+        setHistoryFrequency(result.frequency ?? "monthly");
+      })
+      .catch((reason: Error) => {
+        setEntityHistory([]);
+        setHistoryError(reason.message || "Capacity history request failed.");
+        setHistoryFrequency("monthly");
+      });
+  }, [pipelineBusy, projectId, selectedId, block]);
+  const historyWindowEnd = Math.min(historyWindowStart + historyWindowSize, entityHistory.length);
+  const visibleHistory = entityHistory.slice(historyWindowStart, historyWindowEnd);
+  const historyEvents = visibleHistory.flatMap((point) => (point.events ?? []).map((event) => ({ ...event, stage: point.stage, as_of: point.as_of })));
+  const historyPeriodLabel = historyFrequency === "weekly" ? "Weeks" : "Months";
+  useEffect(() => {
+    if (pipelineBusy || !projectId || !selectedEntity) {
+      setProfileStats(null);
+      setProfileStatus("idle");
+      return;
+    }
+    setProfileStats(null);
+    setProfileStatus("loading");
+    const controller = new AbortController();
+    const isRenewable = selectedEntity.asset_type === "renewable" || ["wind", "solar", "biomass"].includes(normalizeTechnology(selectedEntity.asset_type, selectedEntity.technology));
+    const isHydro = selectedEntity.asset_type === "hydro";
+    const endpoint = (isHydro || isRenewable)
+      ? `/api/projects/${projectId}/assets/${selectedEntity.id}/profile-statistics`
+      : null;
+    if (!endpoint) {
+      setProfileStatus("empty");
+      return () => controller.abort();
+    }
+    let retryTimer: number | undefined;
+    const load = () => api<ProfileStats>(endpoint, { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setProfileStats(result);
+        if (result.status === "pending" || result.status === "running") {
+          setProfileStatus("loading");
+          retryTimer = window.setTimeout(load, 1500);
+        } else if (result.status === "failed") setProfileStatus("error");
+        else if (result.status === "not-applicable") setProfileStatus("empty");
+        else setProfileStatus("ready");
+      })
+      .catch((reason: Error) => {
+        if (controller.signal.aborted) return;
+        setProfileStatus(reason.message.startsWith("404") ? "empty" : "error");
+      });
+    load();
+    return () => {
+      controller.abort();
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [pipelineBusy, projectId, selectedEntity?.id, selectedEntity?.asset_type, selectedEntity?.technology]);
+  useEffect(() => {
+    if (pipelineBusy || !projectId || !selectedNodeBus || !demandDate) {
+      setDemandProfile(null);
+      setDemandProfileStatus("idle");
+      return;
+    }
+    const controller = new AbortController();
+    setDemandProfileStatus("loading");
+    const params = new URLSearchParams({ date: demandDate });
+    if (demandBlockFilter !== "all") params.set("block", demandBlockFilter);
+    if (demandCodeFilter !== "all") params.set("demand_code", demandCodeFilter);
+    api<DemandProfile>(`/api/projects/${projectId}/buses/${encodeURIComponent(selectedNodeBus)}/demand?${params}`, { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setDemandProfile(result);
+        setDemandProfileStatus(result.records.length ? "ready" : "empty");
+      })
+      .catch((reason: Error) => {
+        if (controller.signal.aborted) return;
+        setDemandProfileStatus(reason.message.startsWith("404") ? "empty" : "error");
+      });
+    return () => controller.abort();
+  }, [pipelineBusy, projectId, selectedNodeBus, demandDate, demandBlockFilter, demandCodeFilter]);
   useEffect(() => {
     if (!importRun || ["completed", "failed"].includes(importRun.status))
       return;
@@ -333,6 +667,17 @@ function App() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [importRun]);
+  useEffect(() => {
+    if (importRun?.status !== "completed" || importRun.id === lastRefreshedImportId) return;
+    setLastRefreshedImportId(importRun.id);
+    setRevisionRefreshPending(true);
+    setRevisionRefreshKey((value) => value + 1);
+    setSelectedId("");
+    setSelectedNodeBus("");
+    setEntityHistory([]);
+    setProfileStats(null);
+    setDemandProfile(null);
+  }, [importRun?.id, importRun?.status, lastRefreshedImportId]);
 
   const normalizedEntities = useMemo(
     () =>
@@ -404,6 +749,7 @@ function App() {
               item.entity.bus?.toString() ?? item.coordinates.join(",");
             const group = groups.get(key) ?? {
               key,
+              busCode: item.entity.bus !== undefined ? String(item.entity.bus) : null,
               coordinates: item.coordinates,
               items: [] as Placed[],
             };
@@ -415,9 +761,14 @@ function App() {
       ),
     [located],
   );
-  const selected =
-    systemEntities.find((entity) => entity.id === selectedId) ??
-    systemEntities[0];
+  const selected = systemEntities.find((entity) => entity.id === selectedId);
+  const nodeAssets = selectedNodeBus ? systemEntities.filter((entity) => String(entity.bus) === selectedNodeBus && entity.is_active) : [];
+  const selectedNode = systemBuses.find((bus) => bus.source_code === selectedNodeBus);
+  const searchableNodes = systemBuses.filter((bus) => {
+    const query = nodeQuery.trim().toLowerCase();
+    if (!query) return true;
+    return `${bus.source_code} ${bus.name} ${systemEntities.filter((entity) => String(entity.bus) === bus.source_code).map((entity) => `${entity.name} ${entity.source_code}`).join(" ")}`.toLowerCase().includes(query);
+  });
   const systemCoordinates = visibleBuses.flatMap((bus) => {
     const coordinates = finiteCoordinates(bus.latitude, bus.longitude);
     return coordinates ? [coordinates] : [];
@@ -449,6 +800,20 @@ function App() {
         : selected?.is_active
           ? "base"
           : "future";
+
+  function selectNode(busCode: string, generatorId?: string) {
+    const nodeEntities = systemEntities.filter(
+      (entity) => String(entity.bus) === busCode && entity.is_active,
+    );
+    setSelectedNodeBus(busCode);
+    setSelectedId(
+      generatorId ?? (nodeEntities.length === 1 ? nodeEntities[0].id : ""),
+    );
+    setDemandBlockFilter("all");
+    setDemandCodeFilter("all");
+    setNodeQuery("");
+    setNodeSearchOpen(false);
+  }
 
   async function upload(file: File) {
     if (!projectId) return;
@@ -502,6 +867,10 @@ function App() {
       return {};
     }
   })();
+  const analyticsActive = analyticsStatus?.status === "pending" || analyticsStatus?.status === "running";
+  const processingActive = pipelineHydrating || importActive || revisionRefreshPending || analyticsActive || analyticsStatus?.status === "failed";
+  const processingProgress = importActive ? importDetails.progress ?? 0 : analyticsStatus?.progress ?? 0;
+  const processingPhase = pipelineHydrating ? "checking active revision" : importActive ? importDetails.phase ?? "importing source" : revisionRefreshPending ? "activating new revision" : analyticsStatus?.phase ?? "profile statistics";
 
   return (
     <main className={`workspace theme-${theme}`}>
@@ -638,45 +1007,35 @@ function App() {
               : "Connect to backend to load a revision"}
           </span>
         </div>
-        {snapshot &&
-          (snapshot.study.warnings.length > 0 || systemDemands.length > 0) && (
-            <section
-              className="diagnostics-strip"
-              aria-label="Study diagnostics"
-            >
-              {systemDemands.length > 0 && (
-                <div className="diagnostic-item demand-diagnostic">
-                  <House size={16} aria-hidden="true" />
-                  <span>
-                    <b>DEMAND</b>
-                    {demandTotalGwh.toFixed(1)} GWh · {systemDemands.length}{" "}
-                    source records for stage {stage}, block {block}
-                  </span>
-                  <label className="demand-toggle">
-                    <input
-                      type="checkbox"
-                      checked={showDemandReferences}
-                      onChange={(event) =>
-                        setShowDemandReferences(event.target.checked)
-                      }
-                    />{" "}
-                    Show references
-                  </label>
-                </div>
-              )}
-              {snapshot.study.warnings.map((warning) => (
-                <div
-                  className="diagnostic-item warning-diagnostic"
-                  key={warning}
-                >
-                  <span>
-                    <b>WARNING</b>
-                    {warning}
-                  </span>
-                </div>
-              ))}
-            </section>
-          )}
+        {processingActive && (
+          <section className={`processing-banner processing-${analyticsStatus?.status === "failed" ? "failed" : importActive ? "importing" : "running"}`} aria-live="polite" aria-label="Historical data processing status">
+            <div className="processing-banner-head">
+              <div>
+                <span className="eyebrow">DATA PIPELINE</span>
+                <strong>{importActive ? "Importing source and building model" : analyticsStatus?.status === "failed" ? "Historical profile processing failed" : "Calculating historical profiles"}</strong>
+              </div>
+              <span className="processing-percent">{processingProgress}%</span>
+            </div>
+            <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={processingProgress} aria-label="Historical data processing progress">
+              <span style={{ width: `${Math.min(100, Math.max(0, processingProgress))}%` }} />
+            </div>
+            <div className="processing-banner-meta">
+              <span>{processingPhase}</span>
+              {importActive ? <span>{importRun?.files_processed ?? 0} / {importRun?.files_total || "—"} files</span> : <span>{analyticsStatus?.processed_assets ?? 0} / {analyticsStatus?.total_assets ?? 0} assets</span>}
+              {analyticsStatus?.status === "failed" && <span className="processing-error">{analyticsStatus.error ?? "Check analytics status for details."}</span>}
+              {analyticsError && <span className="processing-error">{analyticsError}</span>}
+            </div>
+          </section>
+        )}
+        {snapshot && (snapshot.study.warnings.length > 0 || systemDemands.length > 0) && (
+          <details className="diagnostics-summary">
+            <summary><span><b>DIAGNOSTICS</b> · {snapshot.study.warnings.length} known limitations{systemDemands.length ? ` · ${systemDemands.length} demand records` : ""}</span><small>Open details</small></summary>
+            <div className="diagnostics-detail">
+              {systemDemands.length > 0 && <div className="diagnostic-item demand-diagnostic"><House size={16} aria-hidden="true" /><span><b>DEMAND</b>{demandTotalGwh.toFixed(1)} GWh · {systemDemands.length} source records for stage {stage}, block {block}</span><label className="demand-toggle"><input type="checkbox" checked={showDemandReferences} onChange={(event) => setShowDemandReferences(event.target.checked)} /> Show references</label></div>}
+              {snapshot.study.warnings.map((warning) => <div className="diagnostic-item warning-diagnostic" key={warning}><span><b>KNOWN LIMITATION</b>{warning}</span></div>)}
+            </div>
+          </details>
+        )}
         {error && (
           <div className="api-error" role="alert">
             <strong>Backend unavailable</strong>
@@ -784,12 +1143,32 @@ function App() {
           </section>
         ) : (
           <>
-            <div className="visual-grid">
-              <section className="map-panel">
+            <div className={`visual-grid${pipelineBusy ? " pipeline-busy" : ""}`} aria-busy={pipelineBusy}>
+              {pipelineBusy && (
+                <div className="pipeline-overlay" role="status" aria-live="polite">
+                  <div className="pipeline-overlay-card">
+                    <span className="eyebrow">ACTIVE REVISION UPDATE</span>
+                    <strong>{pipelineHydrating ? "Checking active revision" : revisionRefreshPending ? "Refreshing model and temporal series" : "Processing source data in background"}</strong>
+                    <span>{pipelineHydrating ? "Waiting for the import status before requesting temporal data." : revisionRefreshPending ? "The map will refresh when the new revision is ready." : `${processingPhase} · ${processingProgress}%`}</span>
+                    <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={processingProgress} aria-label="Active revision update progress"><span style={{ width: `${Math.min(100, Math.max(0, processingProgress))}%` }} /></div>
+                    <small>Historical capacity, maintenance and input profiles will be reloaded automatically.</small>
+                  </div>
+                </div>
+              )}
+                <section className="map-panel">
                 <div className="panel-head">
                   <div>
                     <span className="eyebrow">01 / GEOGRAPHIC CONTEXT</span>
                     <h2>{projectName} input network</h2>
+                  </div>
+                  <div className="node-search">
+                    <label htmlFor="node-search-input"><span className="eyebrow">FIND NODE</span><input id="node-search-input" role="combobox" aria-controls="node-search-results" aria-expanded={nodeSearchOpen} value={nodeQuery} onFocus={() => setNodeSearchOpen(true)} onBlur={() => window.setTimeout(() => setNodeSearchOpen(false), 120)} onChange={(event) => { setNodeQuery(event.target.value); setNodeSearchOpen(true); }} placeholder="Bus code, name or generator" /></label>
+                    {nodeSearchOpen && <div id="node-search-results" className="node-search-results" role="listbox" aria-label="Network nodes">
+                      {searchableNodes.length ? searchableNodes.map((bus) => {
+                        const count = systemEntities.filter((entity) => String(entity.bus) === bus.source_code && entity.is_active).length;
+                        return <button key={bus.source_code} className={selectedNodeBus === bus.source_code ? "selected" : ""} onMouseDown={(event) => event.preventDefault()} onClick={() => selectNode(bus.source_code)} role="option" aria-selected={selectedNodeBus === bus.source_code}><strong>BUS {bus.source_code}</strong><span>{bus.name} · {count} generators</span></button>;
+                      }) : <p className="node-search-empty">No matching node.</p>}
+                    </div>}
                   </div>
                   <div className="legend">
                     {[
@@ -868,10 +1247,8 @@ function App() {
                             )}
                             eventHandlers={{
                               click: () => {
-                                setSelectedId(preview.id);
-                                setOpenNode(
-                                  group.items.length > 1 ? group.key : null,
-                                );
+                                setSelectedNodeBus(group.busCode ?? "");
+                                setSelectedId(group.items.length === 1 ? preview.id : "");
                               },
                             }}
                           >
@@ -907,6 +1284,7 @@ function App() {
                                   key={`demand-${bus.source_code}`}
                                   position={position}
                                   icon={demandMarkerIcon()}
+                                  eventHandlers={{ click: () => selectNode(bus.source_code) }}
                                 >
                                   <Tooltip>
                                     <span className="map-tooltip">
@@ -1012,172 +1390,65 @@ function App() {
                       circuits={visibleCircuits}
                       entities={systemEntities}
                       showDemandReferences={showDemandReferences}
-                      onSelect={(entity) => setSelectedId(entity.id)}
+                       onSelect={(entity) => selectNode(String(entity.bus ?? ""), entity.id)}
                     />
                   </section>
                 )}
-                <div
-                  className="node-grid"
-                  aria-label="Generators by shared node"
-                >
-                  {nodeGroups
-                    .filter(
-                      (group) =>
-                        group.items.length > 1 &&
-                        (openNode === null || openNode === group.key),
-                    )
-                    .map((group) => (
-                      <div className="node-cluster" key={group.key}>
-                        <div className="node-cluster-head">
-                          <strong>BUS {group.key}</strong>
-                          <span>{group.items.length} generators</span>
-                          <button
-                            onClick={() =>
-                              setOpenNode(
-                                openNode === group.key ? null : group.key,
-                              )
-                            }
-                            aria-label={`Toggle generators at bus ${group.key}`}
-                          >
-                            {openNode === group.key ? "CLOSE" : "OPEN"}
-                          </button>
-                        </div>
-                        {(openNode === group.key || openNode === null) && (
-                          <div className="cluster-items">
-                            {group.items.map(({ entity }) => (
-                              <button
-                                key={entity.id}
-                                className={`cluster-item ${entity.id === selected?.id ? "selected" : ""}`}
-                                onClick={() => setSelectedId(entity.id)}
-                                aria-label={`Select ${entity.name}`}
-                              >
-                                <span
-                                  className="technology-icon"
-                                  style={{
-                                    color:
-                                      technologyMeta[entity.technology].color,
-                                  }}
-                                >
-                                  <TechnologyIcon
-                                    technology={entity.technology}
-                                  />
-                                </span>
-                                <span>
-                                  <strong>{entity.name}</strong>
-                                  <small>
-                                    {technologyMeta[entity.technology].label} ·{" "}
-                                    {entity.capacity_mw ?? "—"} MW
-                                  </small>
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                </div>
-                <div className="asset-roster">
-                  {normalizedEntities.map((entity) => (
-                    <button
-                      key={entity.id}
-                      className={`asset-chip ${entity.id === selected?.id ? "selected" : ""}`}
-                      onClick={() => setSelectedId(entity.id)}
-                      aria-label={`Select ${entity.name}`}
-                    >
-                      <span
-                        className="technology-icon"
-                        style={{
-                          color: technologyMeta[entity.technology].color,
-                        }}
-                      >
-                        <TechnologyIcon
-                          technology={entity.technology}
-                          size={13}
-                        />
-                      </span>
-                      {entity.name}
-                    </button>
-                  ))}
-                </div>
+                <div className="node-selection-note">Select a node on the map or use Find Node. Generator details appear in the inspector.</div>
               </section>
-              {selected ? (
-                <aside className="inspector">
-                  <div className="panel-head">
-                    <div>
-                      <span className="eyebrow">02 / INSPECTOR</span>
-                      <h2>{selected.name}</h2>
-                    </div>
-                    <span className={`type-mark ${selected.technology}`}>
-                      {technologyMeta[selected.technology].label}
-                    </span>
+              <aside className="inspector">
+                <div className="node-context-card">
+                  <span className="eyebrow">NODE INSPECTOR</span>
+                  <h2>BUS {selectedNodeBus || "—"}</h2>
+                  <p>{selectedNode?.name ?? "Select a node on the map"} · {nodeAssets.length} active generators</p>
+                  <span>{selectedNode?.demand_mw ? `Demand ${selectedNode.demand_mw.toFixed(1)} MW` : "No demand value"}</span>
+                </div>
+                <div className="generator-selector">
+                  <div className="panel-section-head"><span className="eyebrow">GENERATORS AT THIS NODE</span><strong>{nodeAssets.length}</strong></div>
+                  {nodeAssets.length === 0 ? <p className="muted-copy">Select a node with active generators to inspect its assets.</p> : <div className="generator-selector-grid">{nodeAssets.map((entity) => <button key={entity.id} className={entity.id === selected?.id ? "selected" : ""} onClick={() => setSelectedId(entity.id)} aria-pressed={entity.id === selected?.id}><TechnologyIcon technology={entity.technology} size={16} /><span><strong>{entity.name}</strong><small>{technologyMeta[entity.technology].label} · {entity.capacity_available_mw ?? entity.capacity_mw ?? "—"} MW</small></span></button>)}</div>}
+                </div>
+                {selectedNodeBus && <DemandProfilePanel profile={demandProfile} status={demandProfileStatus} date={demandDate} block={demandBlockFilter} demandCode={demandCodeFilter} onDateChange={setDemandDate} onBlockChange={setDemandBlockFilter} onDemandCodeChange={setDemandCodeFilter} />}
+                <div className="inspector-empty-copy"><strong>{selected ? `${selected.name} selected` : "Choose a generator from the node selector."}</strong><span>{selected ? "Its technical inputs and profile are shown below the network." : "Technical details, capacity history and cached P10/mean/P90 profiles will appear below."}</span></div>
+              </aside>
+             </div>
+              {selected && <section className="generator-details-panel">
+                <div className="generator-details-head panel-head">
+                  <div>
+                    <span className="eyebrow">02 / GENERATOR DETAIL</span>
+                    <h2>{selected.name}</h2>
                   </div>
-                  <div className="entity-summary">
-                    <span className="big-value">
-                      {selected.capacity_mw ?? "—"}
-                    </span>
-                    <span className="unit">
-                      MW
-                      <br />
-                      <small>installed capacity</small>
-                    </span>
+                  <span className={`type-mark ${selected.technology}`}>{technologyMeta[selected.technology].label}</span>
+                </div>
+                <div className="generator-details-body">
+                  <div className="generator-overview">
+                    <div className="entity-summary"><span className="big-value">{selected.capacity_mw ?? "—"}</span><span className="unit">MW<br /><small>installed capacity</small></span></div>
+                    <div className="availability-strip"><span><b>{selected.capacity_available_mw ?? "—"}</b><small>available MW</small></span><span><b>{selected.capacity_maximum_mw ?? selected.capacity_mw ?? "—"}</b><small>maximum MW</small></span></div>
+                    <dl className="facts">
+                      <div><dt>Bus</dt><dd>{selected.bus ?? "not linked"}</dd></div>
+                      <div><dt>Stage</dt><dd>{stage} / {maxStage}</dd></div>
+                      <div><dt>Coordinates</dt><dd className={selected.coordinate_status === "bus-reference" ? "verified" : "warning"}>{selected.coordinate_status === "bus-reference" ? "bus reference" : "missing"}</dd></div>
+                      <div><dt>Input state</dt><dd className={inputState === "base" ? "verified" : "warning"}>{inputState}</dd></div>
+                      <div><dt>Lifecycle</dt><dd>{selected.lifecycle_status}</dd></div>
+                    </dl>
                   </div>
-                  <dl className="facts">
-                    <div>
-                      <dt>Bus</dt>
-                      <dd>{selected.bus ?? "not linked"}</dd>
-                    </div>
-                    <div>
-                      <dt>Stage</dt>
-                      <dd>
-                        {stage} / {maxStage}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Coordinates</dt>
-                      <dd
-                        className={
-                          selected.coordinate_status === "bus-reference"
-                            ? "verified"
-                            : "warning"
-                        }
-                      >
-                        {selected.coordinate_status === "bus-reference"
-                          ? "bus reference"
-                          : "missing"}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Input state</dt>
-                      <dd
-                        className={
-                          inputState === "base" ? "verified" : "warning"
-                        }
-                      >
-                        {inputState}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Lifecycle</dt>
-                      <dd>{selected.lifecycle_status}</dd>
-                    </div>
-                  </dl>
-                  <div className="provenance">
-                    <span className="eyebrow">SOURCE PROVENANCE</span>
-                    <strong>
-                      {selected.source_file} · line {selected.source_line}
-                    </strong>
-                    <p>
-                      {selected.modifications.length} dated modifications
-                      applied before {snapshot?.as_of ?? "this stage"}.
-                    </p>
+                  <div className="generator-inputs">
+                    {selected.technical_details ? <div className="technical-details"><span className="eyebrow">TECHNICAL INPUTS</span>{Object.entries(selected.technical_details).filter(([key]) => !["kind", "source_file", "source_line", "production_curve", "level_volume_curve", "consumption_segments", "alternative_fuels"].includes(key)).slice(0, 8).map(([key, value]) => <div className="technical-row" key={key}><span>{key.replaceAll("_", " ")}</span><strong>{String(value ?? "—")}</strong></div>)}</div> : null}
+                      <div className="history-strip">
+                        <div className="history-strip-head"><span className="eyebrow">CAPACITY AVAILABILITY · {entityHistory.length} {historyPeriodLabel.toLowerCase()}</span><div className="history-window-controls" aria-label="Capacity history range"><button type="button" onClick={() => setHistoryWindowStart(Math.max(0, historyWindowStart - historyWindowSize))} disabled={historyWindowStart === 0} aria-label={`Previous capacity history ${historyPeriodLabel.toLowerCase()}`}>←</button><span>{historyPeriodLabel} {entityHistory.length ? historyWindowStart + 1 : 0}-{historyWindowEnd} / {entityHistory.length}</span><button type="button" onClick={() => setHistoryWindowStart(Math.min(Math.max(0, entityHistory.length - historyWindowSize), historyWindowStart + historyWindowSize))} disabled={historyWindowEnd >= entityHistory.length} aria-label={`Next capacity history ${historyPeriodLabel.toLowerCase()}`}>→</button><select value={historyWindowSize} onChange={(event) => { const nextSize = Number(event.target.value) as 60 | 120; setHistoryWindowSize(nextSize); setHistoryWindowStart(0); }} aria-label={`${historyPeriodLabel} shown in capacity history`}><option value="60">60 {historyPeriodLabel.toLowerCase()}</option><option value="120">120 {historyPeriodLabel.toLowerCase()}</option></select></div></div>
+                     {historyError ? <p className="error-copy">Capacity history could not be loaded: {historyError}</p> : <CapacityHistoryChart history={visibleHistory} fullHistory={entityHistory} frequency={historyFrequency} scale={historyScale} />}
+                        <div className="history-scale-control"><label htmlFor="history-scale">Y scale</label><select id="history-scale" value={historyScale} onChange={(event) => setHistoryScale(event.target.value as HistoryScale)}><option value="absolute">Absolute · 0 MW baseline</option><option value="detail">Detail · cropped axis</option></select></div>
+                        <div className="history-events" aria-label="Capacity and maintenance events">
+                          {historyEvents.length === 0 ? <small className="history-event muted-copy">No hay cambios de potencia o mantenimiento en este rango.</small> : historyEvents.slice(0, 7).map((event) => <div className="history-event" key={`${event.kind}-${event.stage}-${event.source_file}-${event.source_line}`}><strong>{historyPeriodLabel.slice(0, -1).toUpperCase()} {event.stage} · {event.as_of}</strong><span>{formatHistoryEvent(event)}</span><small>{event.source_file}:{event.source_line}</small></div>)}
+                        </div>
+                      </div>
+                    {selected.technical_details?.kind === "thermal" && (() => { const fuelCode = String(selected.technical_details.fuel_code ?? ""); const fuel = snapshot?.fuels?.find((item) => item.source_code === fuelCode); const price = snapshot?.fuel_prices?.find((item) => item.fuel_code === fuelCode); return <div className="fuel-panel"><span className="eyebrow">FUEL / COST</span><div className="fuel-grid"><span><b>{fuel?.name ?? (fuelCode || "—")}</b><small>fuel</small></span><span><b>{price?.price ?? fuel?.base_cost ?? "—"}</b><small>{fuel?.unit_name ?? "source price"}</small></span><span><b>{String(selected.technical_details.variable_om_cost ?? "—")}</b><small>O&M $/MWh</small></span></div><small className="provenance-line">Source: {fuel?.source_file ?? selected.source_file} · values remain source inputs</small></div>; })()}
                   </div>
-                </aside>
-              ) : (
-                <aside className="inspector empty-state">
-                  Select an input asset from the roster.
-                </aside>
-              )}
-            </div>
+                  <div className="generator-analytics">
+                    {(selected.asset_type === "hydro" || ["wind", "solar", "biomass"].includes(selected.technology)) && <ProfileStatsPanel profile={profileStats} status={profileStatus} technology={selected.technology} />}
+                    <div className="provenance"><span className="eyebrow">SOURCE PROVENANCE</span><strong>{selected.source_file} · line {selected.source_line}</strong><p>{selected.modifications.length} dated modifications applied before {snapshot?.as_of ?? "this stage"}.</p></div>
+                  </div>
+                </div>
+              </section>}
             <section className="timeline-panel">
               <div className="timeline-title">
                 <span className="eyebrow">03 / TIME CONTEXT</span>
