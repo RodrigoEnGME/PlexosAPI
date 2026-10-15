@@ -14,6 +14,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  ComposedChart,
   Legend,
   Line,
   LineChart,
@@ -91,6 +92,18 @@ type Maintenance = {
   measure_type: number;
   unit_type: number;
   warnings: string[];
+  family?: string;
+  frequency?: string;
+  system_code?: string | null;
+  interpretation_status?: string;
+};
+type MaintenanceSettings = { project_id: number; revision_id?: number | null; availability_basis: "short_term" | "long_term"; review_status: string; override: Record<string, unknown> };
+type MaintenanceReview = {
+  project_id: number;
+  revision_id: number;
+  review_status: string;
+  availability_basis: "short_term" | "long_term";
+  tables: { source_file: string; family: string; frequency: string; system_code?: string | null; review_status: "pending" | "confirmed" | "overridden"; examples: { source_code: string; asset_name: string; source_line: number; measure_type: number; unit_type: number; values: number[]; warnings: string[]; header_evidence: Record<string, unknown>; interpretation_status: string }[] }[];
 };
 type Snapshot = {
   stage: number;
@@ -101,6 +114,7 @@ type Snapshot = {
     stages: number;
     blocks: number;
     frequency: string;
+    availability_basis?: "short_term" | "long_term";
     warnings: string[];
     block_durations_hours?: Record<string, number[]>;
     systems: { code: string; name: string; country_code?: string }[];
@@ -136,11 +150,11 @@ type Snapshot = {
   provenance: string;
 };
 type HistoryEvent = { kind: string; source_file: string; source_line: number; effective_date: string; value?: number; measure_type?: number; unit_type?: number; fields?: Record<string, unknown> };
-type EntityHistory = { stage: number; as_of: string; year?: number; month?: number; label?: string; lifecycle_status: string; is_active: boolean; capacity_installed_mw?: number; capacity_maximum_mw?: number; capacity_available_mw?: number; maintenance_value?: number | null; maintenance_type?: number | null; maintenance_unit?: number | null; events?: HistoryEvent[] };
+type EntityHistory = { stage: number; as_of: string; year?: number; month?: number; label?: string; lifecycle_status: string; is_active: boolean; capacity_installed_mw?: number; capacity_maximum_mw?: number; capacity_available_mw?: number | null; availability_source?: string; availability_basis?: "short_term" | "long_term" | null; availability_warning?: string | null; has_maintenance_plan?: boolean; maintenance_value?: number | null; maintenance_type?: number | null; maintenance_unit?: number | null; events?: HistoryEvent[] };
 type HistoryFrequency = "monthly" | "weekly";
 type HistoryScale = "absolute" | "detail";
-type SummaryStats = { mean: number; p10: number; p90: number; min: number; max: number; stddev: number; valid_count: number };
-type ProfilePoint = { mean: number; p10: number; p90: number; min: number; max: number; stddev: number; valid_count: number; hour?: number; month?: number; warning?: string | null };
+type SummaryStats = { mean: number; p10: number; p25: number; p75: number; p90: number; min: number; max: number; stddev: number; valid_count: number };
+type ProfilePoint = { mean: number; p10: number; p25: number; p75: number; p90: number; min: number; max: number; stddev: number; valid_count: number; hour?: number; month?: number; warning?: string | null };
 type ProfileStats = { asset_id?: number; status?: "pending" | "running" | "ready" | "failed" | "not-applicable"; progress?: number; processed_assets?: number; total_assets?: number; source_code?: string; unit?: string; grouping?: string; statistics?: SummaryStats; series?: ProfilePoint[]; warnings?: string[]; missing_count?: number; filters?: { month?: number | null; scenario?: number | null; stage?: number | null; block?: number | null }; provenance?: string; error?: string; message?: string };
 type AnalyticsStatus = { status: "not-started" | "pending" | "running" | "ready" | "failed"; phase?: string; progress: number; processed_assets: number; total_assets: number; error?: string | null };
 type DemandProfile = {
@@ -222,53 +236,54 @@ function CapacityHistoryChart({ history, fullHistory, frequency, scale }: { hist
         <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />
         <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={{ stroke: "var(--line)" }} interval={Math.max(0, Math.ceil(data.length / 6) - 1)} />
         <YAxis domain={domain} allowDataOverflow={false} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={false} width={50} tickFormatter={(value: number) => `${value.toFixed(1)}`} />
-        <ChartTooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text)", fontFamily: "DM Mono", fontSize: 11 }} labelFormatter={(_, payload) => { const point = payload?.[0]?.payload as EntityHistory | undefined; return point ? `${point.label ?? point.as_of} · Month ${point.stage}` : "Capacity"; }} formatter={(value) => [`${typeof value === "number" ? value.toFixed(3) : "—"} MW`, "Available"]} />
+         <ChartTooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text)", fontFamily: "DM Mono", fontSize: 11 }} labelFormatter={(_, payload) => { const point = payload?.[0]?.payload as EntityHistory | undefined; return point ? `${point.label ?? point.as_of} · Month ${point.stage}` : "Capacity"; }} formatter={(value) => [`${typeof value === "number" ? value.toFixed(3) : "—"} MW`, "Available Power"]} />
         <Bar dataKey="available" name="available" maxBarSize={18}>
           {data.map((point) => <Cell key={point.stage} fill={point.events?.length ? "var(--chart-p90)" : "var(--accent)"} />)}
         </Bar>
       </BarChart>
     </ResponsiveContainer>
-     <div className="profile-chart-caption"><span>Available MW · {frequency === "weekly" ? "calendar week" : "calendar month"}</span><span>{scale === "absolute" ? "Absolute scale · 0 MW baseline" : "Detail scale · cropped axis"} · {minimum.toFixed(3)}–{maximum.toFixed(3)} MW</span></div>
+      <div className="profile-chart-caption"><span>Available Power · {frequency === "weekly" ? "calendar week" : "calendar month"}</span><span>{scale === "absolute" ? "Absolute scale · 0 MW baseline" : "Detail scale · cropped axis"} · {minimum.toFixed(3)}–{maximum.toFixed(3)} MW</span></div>
    </div>;
 }
 
-function ProfileChart({ profile }: { profile: ProfileStats }) {
+function ProfileChart({ profile, theme }: { profile: ProfileStats; theme: "dark" | "light" }) {
   const points = profile.series ?? [];
   const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const bandColor = theme === "dark" ? "#49a7e0" : "#2587c8";
   if (!points.length) return null;
   const chartData = points.map((point) => ({
     ...point,
     label: point.month ? monthLabels[point.month - 1] : String(point.hour).padStart(2, "0"),
-    bandBase: point.p10,
-    bandWidth: Math.max(0, point.p90 - point.p10),
+    bandBase: point.p25,
+    bandWidth: Math.max(0, point.p75 - point.p25),
   }));
   return <div className="profile-chart" role="img" aria-label={`${profile.grouping ?? "profile"} statistics`}>
     <ResponsiveContainer width="100%" height={240}>
-      <LineChart data={chartData} margin={{ top: 8, right: 14, bottom: 4, left: 0 }}>
+      <ComposedChart data={chartData} margin={{ top: 8, right: 14, bottom: 4, left: 0 }}>
         <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" vertical={false} />
         <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={{ stroke: "var(--line)" }} interval={points.length > 12 ? 3 : 0} />
         <YAxis tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "DM Mono" }} tickLine={false} axisLine={false} width={42} tickFormatter={(value: number) => value.toFixed(1)} />
         <ChartTooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text)", fontFamily: "DM Mono", fontSize: 11 }} labelFormatter={(_, payload) => { const point = payload?.[0]?.payload as (typeof chartData)[number] | undefined; return point ? `${point.label} · n=${point.valid_count}${point.warning ? " · skew/outlier warning" : ""}` : "Profile"; }} formatter={(value, name) => [typeof value === "number" ? value.toFixed(2) : String(value ?? "—"), String(name)]} />
         <Legend wrapperStyle={{ color: "var(--muted)", fontFamily: "DM Mono", fontSize: 10 }} />
-        <Area dataKey="bandBase" stackId="confidence" stroke="none" fill="transparent" legendType="none" tooltipType="none" />
-        <Area dataKey="bandWidth" stackId="confidence" stroke="none" fill="var(--accent)" fillOpacity={0.18} legendType="none" name="P10-P90" />
+        <Area dataKey="bandBase" stackId="quartile-band" stroke="none" fill="#000000" fillOpacity={0} isAnimationActive={false} legendType="none" tooltipType="none" />
+        <Area className="profile-band-area" dataKey="bandWidth" stackId="quartile-band" stroke="none" fill={bandColor} fillOpacity={0.32} isAnimationActive={false} legendType="none" name="P25-P75" />
         <Line type="monotone" dataKey="p10" name="P10" stroke="var(--chart-p10)" strokeDasharray="5 4" strokeWidth={1.5} dot={false} />
         <Line type="monotone" dataKey="mean" name="Mean" stroke="var(--accent)" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
         <Line type="monotone" dataKey="p90" name="P90" stroke="var(--chart-p90)" strokeDasharray="5 4" strokeWidth={1.5} dot={false} />
-      </LineChart>
+      </ComposedChart>
     </ResponsiveContainer>
-     <div className="profile-chart-caption"><span>{profile.grouping === "month-of-year" ? "month" : profile.grouping}</span><span>P10-P90 empirical band</span></div>
+      <div className="profile-chart-caption"><span>{profile.grouping === "month-of-year" ? "month" : profile.grouping}</span><span>P25-P75 interquartile band</span></div>
   </div>;
 }
 
-function ProfileStatsPanel({ profile, status, technology }: { profile: ProfileStats | null; status: "idle" | "loading" | "ready" | "empty" | "error"; technology: string }) {
+function ProfileStatsPanel({ profile, status, technology, theme }: { profile: ProfileStats | null; status: "idle" | "loading" | "ready" | "empty" | "error"; technology: string; theme: "dark" | "light" }) {
   return <section className="profile-panel" aria-live="polite">
     <div className="panel-section-head"><span className="eyebrow">INPUT PROFILE</span><strong>{technology === "hydro" ? "Typical hydrograph" : "Typical renewable profile"}</strong></div>
     {status === "loading" && <p className="muted-copy">Gráficas aún no disponibles. Se están generando en segundo plano{profile?.progress !== undefined ? ` · ${profile.progress}%` : ""}.</p>}
     {status === "empty" && <p className="muted-copy">{profile?.message ?? "No compatible input series is linked to this generator."}</p>}
     {status === "error" && <p className="error-copy">Statistics could not be loaded. The source may be unavailable or the request failed.</p>}
      {profile?.statistics && <div className="stats-grid"><StatValue label="mean" value={profile.statistics.mean} unit={profile.unit} /><StatValue label="P10" value={profile.statistics.p10} /><StatValue label="P90" value={profile.statistics.p90} /><StatValue label="min" value={profile.statistics.min} /><StatValue label="max" value={profile.statistics.max} /><StatValue label="buckets" value={profile.statistics.valid_count} /></div>}
-     {profile?.series && <ProfileChart profile={profile} />}
+     {profile?.series && <ProfileChart profile={profile} theme={theme} />}
      {profile?.warnings?.map((warning) => <small className="profile-warning" key={warning}>{warning}</small>)}
     {profile && <small className="provenance-line">{profile.provenance ?? "Statistics are precalculated for this revision."}{profile.missing_count ? ` · ${profile.missing_count} missing` : ""}</small>}
   </section>;
@@ -393,8 +408,8 @@ function markerIcon(technology: string, count: number) {
   return divIcon({
     className: "generator-marker-wrapper",
     html: `<span class="generator-marker" style="--marker-color:${meta.color}">${icon}${count > 1 ? `<b>${count}</b>` : ""}</span>`,
-    iconSize: [34, 34],
-    iconAnchor: [17, 17],
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
   });
 }
 
@@ -403,9 +418,40 @@ function demandMarkerIcon() {
   return divIcon({
     className: "demand-marker-wrapper",
     html: `<span class="demand-marker" aria-hidden="true">${icon}</span>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
   });
+}
+
+function MaintenanceReviewPanel({ review, onConfirm }: { review: MaintenanceReview; onConfirm: (sourceFile: string, measureType: number, unitType: number, overridden: boolean) => Promise<void> }) {
+  const [choices, setChoices] = useState<Record<string, { measureType: number; unitType: number }>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const hasPendingTables = review.tables.some((table) => table.review_status === "pending");
+  if (!review.tables.length || !hasPendingTables) return null;
+  return <section className="maintenance-review" aria-labelledby="maintenance-review-title">
+    <div className="maintenance-review-head">
+      <div><span className="eyebrow">MAINTENANCE INTERPRETATION</span><h2 id="maintenance-review-title">Review PM table settings</h2><p>Defaults are active. Confirm or override the detected interpretation before relying on the schedule.</p></div>
+      <span className="status-chip warning">REVIEW REQUIRED</span>
+    </div>
+    <div className="maintenance-review-tables">
+      {review.tables.map((table) => {
+        const first = table.examples[0];
+        const choice = choices[table.source_file] ?? { measureType: first?.measure_type ?? 1, unitType: first?.unit_type ?? 2 };
+        return <div className="maintenance-review-table" key={table.source_file}>
+          <div className="maintenance-review-table-head"><strong>{table.source_file}</strong><span>{table.family} · {table.frequency} · system {table.system_code ?? "—"}</span></div>
+          <div className="maintenance-review-controls">
+            <label>TYPE INFO<select aria-label={`Tipo Info ${table.source_file}`} value={choice.measureType} onChange={(event) => setChoices((current) => ({ ...current, [table.source_file]: { ...choice, measureType: Number(event.target.value) } }))}><option value={1}>Reduction</option><option value={2}>Absolute</option></select></label>
+            <label>UNITS<select aria-label={`Units ${table.source_file}`} value={choice.unitType} onChange={(event) => setChoices((current) => ({ ...current, [table.source_file]: { ...choice, unitType: Number(event.target.value) } }))}><option value={1}>Number of units</option><option value={2}>Percentage</option><option value={3}>MW</option><option value={4}>m3/s (unresolved)</option></select></label>
+            <button className="upload-button" disabled={saving === table.source_file || table.review_status !== "pending"} onClick={async () => { setSaving(table.source_file); setError(""); try { await onConfirm(table.source_file, choice.measureType, choice.unitType, choice.measureType !== first?.measure_type || choice.unitType !== first?.unit_type); } catch (reason) { setError(reason instanceof Error ? reason.message : "Maintenance confirmation failed."); } finally { setSaving(null); } }}>{saving === table.source_file ? "Saving..." : table.review_status === "confirmed" ? "Confirmed" : table.review_status === "overridden" ? "Overridden" : "Confirm table"}</button>
+            {table.review_status !== "pending" && <span className={`review-result ${table.review_status}`}>{table.review_status}</span>}
+          </div>
+          {table.examples.map((example) => <div className="maintenance-review-example" key={`${table.source_file}-${example.source_line}`}><code>{table.source_file}:{example.source_line}</code><strong>{example.source_code} {example.asset_name}</strong><span>sample: {example.values.join(", ")}</span><small>{example.warnings.length ? example.warnings.join(" · ") : `Detected ${example.measure_type === 1 ? "reduction" : "absolute"} / ${example.unit_type === 2 ? "percentage" : `unit ${example.unit_type}`}`}</small></div>)}
+        </div>;
+      })}
+    </div>
+    {error && <p className="error-copy" role="alert">{error}</p>}
+  </section>;
 }
 
 function App() {
@@ -419,6 +465,7 @@ function App() {
   const [selectedNodeBus, setSelectedNodeBus] = useState("");
   const [nodeQuery, setNodeQuery] = useState("");
   const [nodeSearchOpen, setNodeSearchOpen] = useState(false);
+  const [activeNodeOption, setActiveNodeOption] = useState(0);
   const [entityHistory, setEntityHistory] = useState<EntityHistory[]>([]);
   const [historyError, setHistoryError] = useState("");
   const [historyFrequency, setHistoryFrequency] = useState<HistoryFrequency>("monthly");
@@ -460,6 +507,8 @@ function App() {
   const [pipelineHydrating, setPipelineHydrating] = useState(false);
   const [analyticsStatus, setAnalyticsStatus] = useState<AnalyticsStatus | null>(null);
   const [analyticsError, setAnalyticsError] = useState("");
+  const [maintenanceSettings, setMaintenanceSettings] = useState<MaintenanceSettings | null>(null);
+  const [maintenanceReview, setMaintenanceReview] = useState<MaintenanceReview | null>(null);
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -473,7 +522,7 @@ function App() {
     api<Project[]>("/api/projects")
       .then((items) => {
         setProjects(items);
-        if (!projectId && items[0]) setProjectId(items[0].id);
+        setProjectId((current) => current ?? items[0]?.id);
       })
       .catch((reason: Error) => {
         setStatus("error");
@@ -486,6 +535,19 @@ function App() {
       .then(setRevisions)
       .catch(() => setRevisions([]));
   }, [projectId]);
+  useEffect(() => {
+    if (!projectId) {
+      setMaintenanceSettings(null);
+      setMaintenanceReview(null);
+      return;
+    }
+    api<MaintenanceSettings>(`/api/projects/${projectId}/maintenance-settings`)
+      .then(setMaintenanceSettings)
+      .catch(() => setMaintenanceSettings(null));
+    api<MaintenanceReview>(`/api/projects/${projectId}/maintenance-review`)
+      .then(setMaintenanceReview)
+      .catch(() => setMaintenanceReview(null));
+  }, [projectId, revisionRefreshKey]);
   useEffect(() => {
     if (!projectId) {
       setImportRun(null);
@@ -564,7 +626,27 @@ function App() {
       });
     return () => controller.abort();
   }, [projectId, stage, block, revisionRefreshKey]);
+  const updateMaintenanceBasis = (basis: "short_term" | "long_term") => {
+    if (!projectId) return;
+    api<MaintenanceSettings>(`/api/projects/${projectId}/maintenance-settings`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ availability_basis: basis }) })
+      .then((result) => {
+        setMaintenanceSettings(result);
+        setRevisionRefreshKey((current) => current + 1);
+      })
+      .catch((reason: Error) => setError(reason.message));
+  };
+  const confirmMaintenanceTable = async (sourceFile: string, measureType: number, unitType: number, overridden: boolean) => {
+    if (!projectId || !maintenanceReview) return;
+    const result = await api<MaintenanceSettings>(`/api/projects/${projectId}/revisions/${maintenanceReview.revision_id}/maintenance-settings/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ availability_basis: maintenanceSettings?.availability_basis ?? "short_term", review_status: overridden ? "overridden" : "confirmed", override: { source_file: sourceFile, measure_type: measureType, unit_type: unitType } }) });
+    setMaintenanceSettings(result);
+    const nextReview = await api<MaintenanceReview>(`/api/projects/${projectId}/maintenance-review`);
+    setMaintenanceReview(nextReview);
+    setRevisionRefreshKey((current) => current + 1);
+  };
   const selectedEntity = snapshot?.entities.find((item) => item.id === selectedId);
+  const selectedEntityId = selectedEntity?.id;
+  const selectedEntityAssetType = selectedEntity?.asset_type;
+  const selectedEntityTechnology = selectedEntity?.technology;
   useEffect(() => {
     if (pipelineBusy || !projectId || !selectedId) {
       setEntityHistory([]);
@@ -593,7 +675,7 @@ function App() {
   const historyEvents = visibleHistory.flatMap((point) => (point.events ?? []).map((event) => ({ ...event, stage: point.stage, as_of: point.as_of })));
   const historyPeriodLabel = historyFrequency === "weekly" ? "Weeks" : "Months";
   useEffect(() => {
-    if (pipelineBusy || !projectId || !selectedEntity) {
+    if (pipelineBusy || !projectId || !selectedEntityId || !selectedEntityAssetType) {
       setProfileStats(null);
       setProfileStatus("idle");
       return;
@@ -601,10 +683,10 @@ function App() {
     setProfileStats(null);
     setProfileStatus("loading");
     const controller = new AbortController();
-    const isRenewable = selectedEntity.asset_type === "renewable" || ["wind", "solar", "biomass"].includes(normalizeTechnology(selectedEntity.asset_type, selectedEntity.technology));
-    const isHydro = selectedEntity.asset_type === "hydro";
+    const isRenewable = selectedEntityAssetType === "renewable" || ["wind", "solar", "biomass"].includes(normalizeTechnology(selectedEntityAssetType, selectedEntityTechnology ?? ""));
+    const isHydro = selectedEntityAssetType === "hydro";
     const endpoint = (isHydro || isRenewable)
-      ? `/api/projects/${projectId}/assets/${selectedEntity.id}/profile-statistics`
+      ? `/api/projects/${projectId}/assets/${selectedEntityId}/profile-statistics`
       : null;
     if (!endpoint) {
       setProfileStatus("empty");
@@ -631,7 +713,7 @@ function App() {
       controller.abort();
       if (retryTimer) window.clearTimeout(retryTimer);
     };
-  }, [pipelineBusy, projectId, selectedEntity?.id, selectedEntity?.asset_type, selectedEntity?.technology]);
+  }, [pipelineBusy, projectId, selectedEntityId, selectedEntityAssetType, selectedEntityTechnology]);
   useEffect(() => {
     if (pipelineBusy || !projectId || !selectedNodeBus || !demandDate) {
       setDemandProfile(null);
@@ -762,6 +844,12 @@ function App() {
     [located],
   );
   const selected = systemEntities.find((entity) => entity.id === selectedId);
+  const availabilityBasisDisabled = !selected || selected.has_maintenance_plan || !["thermal", "hydro"].includes(selected.asset_type);
+  const availabilityBasisNote = selected?.has_maintenance_plan
+    ? "PM schedule controls this machine"
+    : selected && !["thermal", "hydro"].includes(selected.asset_type)
+      ? "Outage index is not applicable to this asset type"
+      : "Used for machines without a PM plan";
   const nodeAssets = selectedNodeBus ? systemEntities.filter((entity) => String(entity.bus) === selectedNodeBus && entity.is_active) : [];
   const selectedNode = systemBuses.find((bus) => bus.source_code === selectedNodeBus);
   const searchableNodes = systemBuses.filter((bus) => {
@@ -800,6 +888,25 @@ function App() {
         : selected?.is_active
           ? "base"
           : "future";
+  const topologySection = !geographicLayout && snapshot ? (
+    <section className="topology-panel">
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow">DERIVED NETWORK VIEW</span>
+          <h2>{selectedSystemInfo?.name ?? "Study"} topology</h2>
+        </div>
+        <span className="topology-status">NOT GEOGRAPHIC</span>
+      </div>
+      <TopologyLayout
+        buses={visibleBuses}
+        circuits={visibleCircuits}
+        entities={systemEntities}
+        selectedBus={selectedNodeBus}
+        showDemandReferences={showDemandReferences}
+        onSelectBus={selectNode}
+      />
+    </section>
+  ) : null;
 
   function selectNode(busCode: string, generatorId?: string) {
     const nodeEntities = systemEntities.filter(
@@ -813,6 +920,7 @@ function App() {
     setDemandCodeFilter("all");
     setNodeQuery("");
     setNodeSearchOpen(false);
+    setActiveNodeOption(0);
   }
 
   async function upload(file: File) {
@@ -874,7 +982,7 @@ function App() {
 
   return (
     <main className={`workspace theme-${theme}`}>
-      <aside className="rail">
+      <aside className="rail" aria-label="Application navigation">
         <div className="rail-logo">
           GME<span>·</span>PX
         </div>
@@ -882,19 +990,23 @@ function App() {
           <button
             className={view === "map" ? "nav-active" : ""}
             onClick={() => setView("map")}
+            aria-label="01 Map workspace"
+            aria-current={view === "map" ? "page" : undefined}
           >
             01 <span>System map</span>
           </button>
           <button
             className={view === "files" ? "nav-active" : ""}
             onClick={() => setView("files")}
+            aria-label="02 Files"
+            aria-current={view === "files" ? "page" : undefined}
           >
             02 <span>Files</span>
           </button>
-          <button>
+          <button aria-label="03 Mappings, unavailable" disabled>
             03 <span>Mappings</span>
           </button>
-          <button>
+          <button aria-label="04 Exports, unavailable" disabled>
             04 <span>Exports</span>
           </button>
         </nav>
@@ -1155,18 +1267,24 @@ function App() {
                   </div>
                 </div>
               )}
-                <section className="map-panel">
+                <section className={`map-panel ${geographicLayout ? "geographic-layout" : "topology-first"}`}>
                 <div className="panel-head">
                   <div>
-                    <span className="eyebrow">01 / GEOGRAPHIC CONTEXT</span>
+                    <span className="eyebrow">{geographicLayout ? "01 / GEOGRAPHIC CONTEXT" : "01 / NETWORK TOPOLOGY"}</span>
                     <h2>{projectName} input network</h2>
                   </div>
                   <div className="node-search">
-                    <label htmlFor="node-search-input"><span className="eyebrow">FIND NODE</span><input id="node-search-input" role="combobox" aria-controls="node-search-results" aria-expanded={nodeSearchOpen} value={nodeQuery} onFocus={() => setNodeSearchOpen(true)} onBlur={() => window.setTimeout(() => setNodeSearchOpen(false), 120)} onChange={(event) => { setNodeQuery(event.target.value); setNodeSearchOpen(true); }} placeholder="Bus code, name or generator" /></label>
+                    <label htmlFor="node-search-input"><span className="eyebrow">FIND NODE</span><input id="node-search-input" role="combobox" aria-autocomplete="list" aria-controls="node-search-results" aria-expanded={nodeSearchOpen} aria-activedescendant={nodeSearchOpen && searchableNodes.length ? `node-option-${searchableNodes[Math.min(activeNodeOption, searchableNodes.length - 1)].source_code}` : undefined} value={nodeQuery} onFocus={() => { setNodeSearchOpen(true); setActiveNodeOption(0); }} onBlur={() => window.setTimeout(() => setNodeSearchOpen(false), 120)} onChange={(event) => { setNodeQuery(event.target.value); setNodeSearchOpen(true); setActiveNodeOption(0); }} onKeyDown={(event) => {
+                      if (event.key === "ArrowDown") { event.preventDefault(); setNodeSearchOpen(true); setActiveNodeOption((current) => Math.min(searchableNodes.length - 1, current + 1)); }
+                      if (event.key === "ArrowUp") { event.preventDefault(); setActiveNodeOption((current) => Math.max(0, current - 1)); }
+                      if (event.key === "Enter" && nodeSearchOpen && searchableNodes.length) { event.preventDefault(); selectNode(searchableNodes[Math.min(activeNodeOption, searchableNodes.length - 1)].source_code); }
+                      if (event.key === "Escape") { event.preventDefault(); setNodeSearchOpen(false); }
+                    }} placeholder="Bus code, name or generator" /></label>
                     {nodeSearchOpen && <div id="node-search-results" className="node-search-results" role="listbox" aria-label="Network nodes">
                       {searchableNodes.length ? searchableNodes.map((bus) => {
                         const count = systemEntities.filter((entity) => String(entity.bus) === bus.source_code && entity.is_active).length;
-                        return <button key={bus.source_code} className={selectedNodeBus === bus.source_code ? "selected" : ""} onMouseDown={(event) => event.preventDefault()} onClick={() => selectNode(bus.source_code)} role="option" aria-selected={selectedNodeBus === bus.source_code}><strong>BUS {bus.source_code}</strong><span>{bus.name} · {count} generators</span></button>;
+                        const optionIndex = searchableNodes.indexOf(bus);
+                        return <button id={`node-option-${bus.source_code}`} key={bus.source_code} className={`${selectedNodeBus === bus.source_code ? "selected " : ""}${activeNodeOption === optionIndex ? "active" : ""}`.trim()} onMouseEnter={() => setActiveNodeOption(optionIndex)} onMouseDown={(event) => event.preventDefault()} onClick={() => selectNode(bus.source_code)} role="option" aria-selected={selectedNodeBus === bus.source_code}><strong>BUS {bus.source_code}</strong><span>{bus.name} · {count} generators</span></button>;
                       }) : <p className="node-search-empty">No matching node.</p>}
                     </div>}
                   </div>
@@ -1194,12 +1312,17 @@ function App() {
                     </span>
                   </div>
                 </div>
-                <div className="map-canvas">
+                {topologySection}
+                <div
+                  className="map-canvas"
+                  role="region"
+                  aria-label={geographicLayout ? "Geographic map of input assets" : `${countryContext?.name ?? "Study"} reference geography`}
+                >
                   {snapshot && geographicLayout ? (
                     <MapContainer
                       center={[-32.9, -56]}
                       zoom={6}
-                      scrollWheelZoom
+                      scrollWheelZoom={false}
                       className="leaflet-map"
                       aria-label="Geographic map of input assets"
                     >
@@ -1245,6 +1368,8 @@ function App() {
                               preview.technology,
                               group.items.length,
                             )}
+                            alt={`Select node ${group.busCode ?? group.key}: ${group.items.length} generator${group.items.length === 1 ? "" : "s"}`}
+                            title={`Node ${group.busCode ?? group.key}: ${preview.name}`}
                             eventHandlers={{
                               click: () => {
                                 setSelectedNodeBus(group.busCode ?? "");
@@ -1284,6 +1409,8 @@ function App() {
                                   key={`demand-${bus.source_code}`}
                                   position={position}
                                   icon={demandMarkerIcon()}
+                                  alt={`Select demand node ${bus.source_code}`}
+                                  title={`Demand at node ${bus.source_code}`}
                                   eventHandlers={{ click: () => selectNode(bus.source_code) }}
                                 >
                                   <Tooltip>
@@ -1305,7 +1432,7 @@ function App() {
                     <MapContainer
                       center={countryContext.center}
                       zoom={5}
-                      scrollWheelZoom
+                      scrollWheelZoom={false}
                       className="leaflet-map"
                       aria-label={`${countryContext.name} country context map`}
                     >
@@ -1348,7 +1475,7 @@ function App() {
                     <small>
                       {geographicLayout
                         ? "Shared nodes are grouped without shifting official coordinates."
-                        : "Country context is reference geography only; assets use the derived topology below."}
+                        : "Country context is secondary reference geography; assets use the derived topology."}
                     </small>
                     {!geographicLayout && countryContext && (
                       <button
@@ -1376,25 +1503,54 @@ function App() {
                     Show country context map
                   </button>
                 )}
-                {!geographicLayout && snapshot && (
-                  <section className="topology-panel">
-                    <div className="panel-head">
-                      <div>
-                        <span className="eyebrow">DERIVED NETWORK VIEW</span>
-                        <h2>{selectedSystemInfo?.name ?? "Study"} topology</h2>
-                      </div>
-                      <span className="topology-status">NOT GEOGRAPHIC</span>
-                    </div>
-                    <TopologyLayout
-                      buses={visibleBuses}
-                      circuits={visibleCircuits}
-                      entities={systemEntities}
-                      showDemandReferences={showDemandReferences}
-                       onSelect={(entity) => selectNode(String(entity.bus ?? ""), entity.id)}
-                    />
-                  </section>
-                )}
                 <div className="node-selection-note">Select a node on the map or use Find Node. Generator details appear in the inspector.</div>
+              </section>
+              <section className="timeline-panel">
+                <div className="timeline-title">
+                  <span className="eyebrow">03 / TIME CONTEXT</span>
+                  <h2>Input horizon</h2>
+                  <p>Stage changes reload the intermediate database snapshot.</p>
+                </div>
+                <div className="timeline-scroll" tabIndex={0} aria-label="Scrollable study timeline">
+                  <div className="timeline-control">
+                    <div className="timeline-meta">
+                      <span>
+                        STAGE <b>{stage}</b>
+                      </span>
+                      <span>{snapshot?.as_of ?? "—"}</span>
+                      <label>
+                        BLOCK{" "}
+                        <select
+                          aria-label="Study block"
+                          value={block}
+                          onChange={(event) => setBlock(Number(event.target.value))}
+                        >
+                          {Array.from({ length: maxBlock }, (_, index) => (
+                            <option key={index + 1} value={index + 1}>
+                              {index + 1}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <span className="timeline-family">FAMILY <b>INPUT MODEL</b></span>
+                    </div>
+                    <input
+                      aria-label="Study stage"
+                      type="range"
+                      min="1"
+                      max={maxStage}
+                      value={Math.min(stage, maxStage)}
+                      onChange={(event) => setStage(Number(event.target.value))}
+                    />
+                    <div className="ticks">
+                      <span>01</span>
+                      <span>{Math.round(maxStage / 4)}</span>
+                      <span>{Math.round(maxStage / 2)}</span>
+                      <span>{Math.round((maxStage * 3) / 4)}</span>
+                      <span>{maxStage}</span>
+                    </div>
+                  </div>
+                </div>
               </section>
               <aside className="inspector">
                 <div className="node-context-card">
@@ -1421,8 +1577,9 @@ function App() {
                 </div>
                 <div className="generator-details-body">
                   <div className="generator-overview">
-                    <div className="entity-summary"><span className="big-value">{selected.capacity_mw ?? "—"}</span><span className="unit">MW<br /><small>installed capacity</small></span></div>
-                    <div className="availability-strip"><span><b>{selected.capacity_available_mw ?? "—"}</b><small>available MW</small></span><span><b>{selected.capacity_maximum_mw ?? selected.capacity_mw ?? "—"}</b><small>maximum MW</small></span></div>
+                     <div className="entity-summary"><span className="big-value">{selected.capacity_available_mw ?? "—"}</span><span className="unit">MW<br /><small>available power</small></span></div>
+                      <div className="availability-strip"><span><b>{selected.capacity_installed_mw ?? selected.capacity_mw ?? "—"}</b><small>installed power</small></span></div>
+                     {selected.availability_warning && <p className="warning-copy">{selected.availability_warning}</p>}
                     <dl className="facts">
                       <div><dt>Bus</dt><dd>{selected.bus ?? "not linked"}</dd></div>
                       <div><dt>Stage</dt><dd>{stage} / {maxStage}</dd></div>
@@ -1436,7 +1593,7 @@ function App() {
                       <div className="history-strip">
                         <div className="history-strip-head"><span className="eyebrow">CAPACITY AVAILABILITY · {entityHistory.length} {historyPeriodLabel.toLowerCase()}</span><div className="history-window-controls" aria-label="Capacity history range"><button type="button" onClick={() => setHistoryWindowStart(Math.max(0, historyWindowStart - historyWindowSize))} disabled={historyWindowStart === 0} aria-label={`Previous capacity history ${historyPeriodLabel.toLowerCase()}`}>←</button><span>{historyPeriodLabel} {entityHistory.length ? historyWindowStart + 1 : 0}-{historyWindowEnd} / {entityHistory.length}</span><button type="button" onClick={() => setHistoryWindowStart(Math.min(Math.max(0, entityHistory.length - historyWindowSize), historyWindowStart + historyWindowSize))} disabled={historyWindowEnd >= entityHistory.length} aria-label={`Next capacity history ${historyPeriodLabel.toLowerCase()}`}>→</button><select value={historyWindowSize} onChange={(event) => { const nextSize = Number(event.target.value) as 60 | 120; setHistoryWindowSize(nextSize); setHistoryWindowStart(0); }} aria-label={`${historyPeriodLabel} shown in capacity history`}><option value="60">60 {historyPeriodLabel.toLowerCase()}</option><option value="120">120 {historyPeriodLabel.toLowerCase()}</option></select></div></div>
                      {historyError ? <p className="error-copy">Capacity history could not be loaded: {historyError}</p> : <CapacityHistoryChart history={visibleHistory} fullHistory={entityHistory} frequency={historyFrequency} scale={historyScale} />}
-                        <div className="history-scale-control"><label htmlFor="history-scale">Y scale</label><select id="history-scale" value={historyScale} onChange={(event) => setHistoryScale(event.target.value as HistoryScale)}><option value="absolute">Absolute · 0 MW baseline</option><option value="detail">Detail · cropped axis</option></select></div>
+                         <div className="history-scale-control"><label htmlFor="availability-basis">Outage basis</label><select id="availability-basis" aria-label="Availability basis" disabled={availabilityBasisDisabled} value={maintenanceSettings?.availability_basis ?? "short_term"} onChange={(event) => updateMaintenanceBasis(event.target.value as "short_term" | "long_term")}><option value="short_term">Short-term index</option><option value="long_term">Historical index</option></select><small>{availabilityBasisNote}</small><label htmlFor="history-scale">Y scale</label><select id="history-scale" value={historyScale} onChange={(event) => setHistoryScale(event.target.value as HistoryScale)}><option value="absolute">Absolute · 0 MW baseline</option><option value="detail">Detail · cropped axis</option></select></div>
                         <div className="history-events" aria-label="Capacity and maintenance events">
                           {historyEvents.length === 0 ? <small className="history-event muted-copy">No hay cambios de potencia o mantenimiento en este rango.</small> : historyEvents.slice(0, 7).map((event) => <div className="history-event" key={`${event.kind}-${event.stage}-${event.source_file}-${event.source_line}`}><strong>{historyPeriodLabel.slice(0, -1).toUpperCase()} {event.stage} · {event.as_of}</strong><span>{formatHistoryEvent(event)}</span><small>{event.source_file}:{event.source_line}</small></div>)}
                         </div>
@@ -1444,55 +1601,11 @@ function App() {
                     {selected.technical_details?.kind === "thermal" && (() => { const fuelCode = String(selected.technical_details.fuel_code ?? ""); const fuel = snapshot?.fuels?.find((item) => item.source_code === fuelCode); const price = snapshot?.fuel_prices?.find((item) => item.fuel_code === fuelCode); return <div className="fuel-panel"><span className="eyebrow">FUEL / COST</span><div className="fuel-grid"><span><b>{fuel?.name ?? (fuelCode || "—")}</b><small>fuel</small></span><span><b>{price?.price ?? fuel?.base_cost ?? "—"}</b><small>{fuel?.unit_name ?? "source price"}</small></span><span><b>{String(selected.technical_details.variable_om_cost ?? "—")}</b><small>O&M $/MWh</small></span></div><small className="provenance-line">Source: {fuel?.source_file ?? selected.source_file} · values remain source inputs</small></div>; })()}
                   </div>
                   <div className="generator-analytics">
-                    {(selected.asset_type === "hydro" || ["wind", "solar", "biomass"].includes(selected.technology)) && <ProfileStatsPanel profile={profileStats} status={profileStatus} technology={selected.technology} />}
+                    {(selected.asset_type === "hydro" || ["wind", "solar", "biomass"].includes(selected.technology)) && <ProfileStatsPanel profile={profileStats} status={profileStatus} technology={selected.technology} theme={theme} />}
                     <div className="provenance"><span className="eyebrow">SOURCE PROVENANCE</span><strong>{selected.source_file} · line {selected.source_line}</strong><p>{selected.modifications.length} dated modifications applied before {snapshot?.as_of ?? "this stage"}.</p></div>
                   </div>
                 </div>
               </section>}
-            <section className="timeline-panel">
-              <div className="timeline-title">
-                <span className="eyebrow">03 / TIME CONTEXT</span>
-                <h2>Input horizon</h2>
-                <p>Stage changes reload the intermediate database snapshot.</p>
-              </div>
-              <div className="timeline-control">
-                <div className="timeline-meta">
-                  <span>
-                    STAGE <b>{stage}</b>
-                  </span>
-                  <span>{snapshot?.as_of ?? "—"}</span>
-                  <label>
-                    BLOCK{" "}
-                    <select
-                      aria-label="Study block"
-                      value={block}
-                      onChange={(event) => setBlock(Number(event.target.value))}
-                    >
-                      {Array.from({ length: maxBlock }, (_, index) => (
-                        <option key={index + 1} value={index + 1}>
-                          {index + 1}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <input
-                  aria-label="Study stage"
-                  type="range"
-                  min="1"
-                  max={maxStage}
-                  value={Math.min(stage, maxStage)}
-                  onChange={(event) => setStage(Number(event.target.value))}
-                />
-                <div className="ticks">
-                  <span>01</span>
-                  <span>{Math.round(maxStage / 4)}</span>
-                  <span>{Math.round(maxStage / 2)}</span>
-                  <span>{Math.round((maxStage * 3) / 4)}</span>
-                  <span>{maxStage}</span>
-                </div>
-              </div>
-            </section>
             {unlocated.length > 0 && (
               <section className="unlocated-strip">
                 <span className="eyebrow">LOCATION DATA GAP</span>
@@ -1508,6 +1621,7 @@ function App() {
             )}
           </>
         )}
+        {maintenanceReview && <MaintenanceReviewPanel review={maintenanceReview} onConfirm={confirmMaintenanceTable} />}
       </section>
     </main>
   );

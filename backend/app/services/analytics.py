@@ -49,7 +49,7 @@ def _stats(values: list[float]) -> dict[str, float | int]:
         upper = min(lower + 1, len(ordered) - 1)
         return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
     return {
-        "mean": mean(values), "p10": percentile(.1), "p90": percentile(.9),
+        "mean": mean(values), "p10": percentile(.1), "p25": percentile(.25), "p75": percentile(.75), "p90": percentile(.9),
         "minimum": ordered[0], "maximum": ordered[-1],
         "standard_deviation": pstdev(values), "valid_count": len(values),
     }

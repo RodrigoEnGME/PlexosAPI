@@ -656,47 +656,102 @@ def _load_maintenance(root: Path, revision: StudyRevision, db: Session) -> int:
         if not name.startswith(("pmhi", "pmtr")):
             continue
         asset_type = "hydro" if name.startswith("pmhi") else "thermal"
+        file_match = re.match(r"^pm(?P<family>hi|tr)(?P<frequency>se|me)(?P<system>[^.]*)\.dat$", name, re.IGNORECASE)
+        family = f"PM{file_match.group('family').upper()}" if file_match else ("PMHI" if name.startswith("pmhi") else "PMTR")
+        frequency = "weekly" if file_match and file_match.group("frequency").lower() == "se" else "monthly"
+        system_code = file_match.group("system").lower() if file_match and file_match.group("system") else None
         measure_type: int | None = None
         unit_type: int | None = None
+        declared_measure_type: int | None = None
+        declared_unit_type: int | None = None
+        header_evidence: dict[str, object] = {}
         source_code: str | None = None
         asset_name = ""
         for line_number, line in _read_lines(path):
             info = re.search(rf"{localized_marker_pattern('info_type', language)}\s*\.?\s*:\s*(\d+)", line, re.IGNORECASE)
             if info:
                 measure_type = int(info.group(1))
+                declared_measure_type = measure_type
+                header_evidence["info_type"] = {"value": measure_type, "line": line_number, "text": line.strip()}
                 continue
             units = re.search(rf"{localized_marker_pattern('units', language)}\s*:\s*(\d+)", line, re.IGNORECASE)
             if units:
                 unit_type = int(units.group(1))
+                declared_unit_type = unit_type
+                header_evidence["units"] = {"value": unit_type, "line": line_number, "text": line.strip()}
                 continue
             plant = re.match(rf"^\*\*\*\*\s*{localized_marker_pattern('plant', language)}\s*:\s*(\d+)\s*(.*)$", line, re.IGNORECASE)
             if plant:
-                source_code, asset_name = plant.group(1), plant.group(2).strip()
+                source_code = plant.group(1)
+                tokens = plant.group(2).split()
+                pair = tokens[-2:] if len(tokens) >= 2 and all(token.isdigit() for token in tokens[-2:]) else []
+                asset_name = " ".join(tokens[:-2] if pair else tokens)
+                plant_measure_type = declared_measure_type
+                plant_unit_type = declared_unit_type
+                interpretation_status = "header"
+                plant_warnings: list[str] = []
+                if pair:
+                    plant_unit_type, plant_measure_type = int(pair[0]), int(pair[1])
+                    interpretation_status = "inferred"
+                    if plant_unit_type not in {1, 2, 3, 4} or plant_measure_type not in {1, 2}:
+                        plant_warnings.append("trailing plant configuration is outside documented Tipo Info./Unidades values")
+                        plant_measure_type, plant_unit_type = measure_type, unit_type
+                        interpretation_status = "header"
+                    elif declared_measure_type is not None and declared_unit_type is not None and (plant_measure_type != declared_measure_type or plant_unit_type != declared_unit_type):
+                        plant_warnings.append("trailing plant configuration differs from the file headers")
+                if plant_measure_type is None:
+                    plant_measure_type = 1
+                    plant_warnings.append("maintenance measure type missing; defaulted to reduction")
+                    interpretation_status = "defaulted"
+                if plant_unit_type is None:
+                    plant_unit_type = 2
+                    plant_warnings.append("maintenance unit type missing; defaulted to percentage")
+                    interpretation_status = "defaulted"
+                header_evidence["plant"] = {
+                    "family": family,
+                    "frequency": frequency,
+                    "system_code": system_code,
+                    "plant_header": line.strip(),
+                    "trailing_pair": {"unit_type": int(pair[0]), "measure_type": int(pair[1])} if pair else None,
+                    "effective": {"unit_type": plant_unit_type, "measure_type": plant_measure_type},
+                }
+                header_evidence["plant_warnings"] = plant_warnings
+                measure_type, unit_type = plant_measure_type, plant_unit_type
                 continue
             values = line.split()
             if not values or not values[0].isdigit() or source_code is None:
                 continue
             year = int(values[0])
             stage_values = [_number(value) for value in values[1:]]
-            warnings: list[str] = []
-            if measure_type is None or unit_type is None:
-                warnings.append("missing maintenance type or units header")
+            warnings: list[str] = list(header_evidence.get("plant_warnings", []))
+            if measure_type is None:
+                measure_type = 1
+                warnings.append("maintenance measure type missing; defaulted to reduction")
+            if unit_type is None:
+                unit_type = 2
+                warnings.append("maintenance unit type missing; defaulted to percentage")
             if not stage_values:
                 warnings.append("maintenance row has no stage values")
-            if unit_type == 1 and any(value < 0 or not value.is_integer() or value > 1 for value in stage_values):
+            if unit_type == 1 and any(value < 0 or not value.is_integer() for value in stage_values):
                 warnings.append("maintenance uses number-of-units but contains a non-integral or out-of-range value; value will not be applied")
             db.add(StudyMaintenance(
                 revision_id=revision.id,
                 asset_type=asset_type,
                 source_code=source_code,
                 asset_name=asset_name,
-                measure_type=measure_type or 0,
-                unit_type=unit_type or 0,
+                measure_type=measure_type,
+                unit_type=unit_type,
                 year=year,
                 stage_values_json=json.dumps(stage_values),
                 source_file=path.name,
                 source_line=line_number,
                 warnings_json=json.dumps(warnings),
+                family=family,
+                frequency=frequency,
+                system_code=system_code,
+                header_evidence_json=json.dumps(header_evidence, ensure_ascii=False),
+                interpretation_status="inferred" if header_evidence.get("plant", {}).get("trailing_pair") else "header",
+                review_status="pending",
             ))
             count += 1
     db.flush()

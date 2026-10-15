@@ -19,6 +19,7 @@ from app.models import (
     StudyFuelPrice,
     StudyHydroDetail,
     StudyMaintenance,
+    MaintenanceSetting,
     StudyRenewableDetail,
     StudyRevision,
     StudySystem,
@@ -139,9 +140,9 @@ def effective_snapshot(revision: StudyRevision, stage: int, block: int | None, d
         hydro = hydro_details.get(asset.source_code)
         renewable = renewable_details.get(asset.source_code)
         if thermal:
-            row["technical_details"] = {"kind": "thermal", "unit_count": thermal.unit_count, "plant_type": thermal.plant_type, "min_generation_mw": thermal.min_generation_mw, "max_generation_mw": thermal.max_generation_mw, "short_term_outage_pct": thermal.short_term_outage_pct, "historical_outage_pct": thermal.historical_outage_pct, "variable_om_cost": thermal.variable_om_cost, "fuel_code": thermal.fuel_code, "consumption_segments": json.loads(thermal.consumption_segments_json), "alternative_fuels": json.loads(thermal.alternative_fuels_json), "commitment_type": thermal.commitment_type, "transport_cost": thermal.transport_cost, "startup_cost": thermal.startup_cost, "gas_system": thermal.gas_system, "combined_cycle_code": thermal.combined_cycle_code, "emission_factor": thermal.emission_factor, "source_file": thermal.source_file, "source_line": thermal.source_line}
+            row["technical_details"] = {"kind": "thermal", "unit_count": thermal.unit_count, "plant_type": thermal.plant_type, "min_generation_mw": thermal.min_generation_mw, "max_generation_mw": thermal.max_generation_mw, "variable_om_cost": thermal.variable_om_cost, "fuel_code": thermal.fuel_code, "consumption_segments": json.loads(thermal.consumption_segments_json), "alternative_fuels": json.loads(thermal.alternative_fuels_json), "commitment_type": thermal.commitment_type, "transport_cost": thermal.transport_cost, "startup_cost": thermal.startup_cost, "gas_system": thermal.gas_system, "combined_cycle_code": thermal.combined_cycle_code, "emission_factor": thermal.emission_factor, "source_file": thermal.source_file, "source_line": thermal.source_line}
         elif hydro:
-            row["technical_details"] = {"kind": "hydro", "station_code": hydro.station_code, "downstream_spill_code": hydro.downstream_spill_code, "downstream_turbine_code": hydro.downstream_turbine_code, "unit_count": hydro.unit_count, "plant_type": hydro.plant_type, "production_factor": hydro.production_factor, "min_turbine_flow": hydro.min_turbine_flow, "max_turbine_flow": hydro.max_turbine_flow, "min_volume_hm3": hydro.min_volume_hm3, "max_volume_hm3": hydro.max_volume_hm3, "initial_condition": hydro.initial_condition, "min_total_flow": hydro.min_total_flow, "spill_mode": hydro.spill_mode, "short_term_outage_pct": hydro.short_term_outage_pct, "historical_outage_pct": hydro.historical_outage_pct, "production_curve": json.loads(hydro.production_curve_json), "level_volume_curve": json.loads(hydro.level_volume_curve_json), "source_file": hydro.source_file, "source_line": hydro.source_line}
+            row["technical_details"] = {"kind": "hydro", "station_code": hydro.station_code, "downstream_spill_code": hydro.downstream_spill_code, "downstream_turbine_code": hydro.downstream_turbine_code, "unit_count": hydro.unit_count, "plant_type": hydro.plant_type, "production_factor": hydro.production_factor, "min_turbine_flow": hydro.min_turbine_flow, "max_turbine_flow": hydro.max_turbine_flow, "min_volume_hm3": hydro.min_volume_hm3, "max_volume_hm3": hydro.max_volume_hm3, "initial_condition": hydro.initial_condition, "min_total_flow": hydro.min_total_flow, "spill_mode": hydro.spill_mode, "production_curve": json.loads(hydro.production_curve_json), "level_volume_curve": json.loads(hydro.level_volume_curve_json), "source_file": hydro.source_file, "source_line": hydro.source_line}
         elif renewable:
             row["technical_details"] = {"kind": "renewable", "unit_count": renewable.unit_count, "plant_type": renewable.plant_type, "operating_factor": renewable.operating_factor, "failure_probability": renewable.failure_probability, "technology_type": renewable.technology_type, "source_file": renewable.source_file, "source_line": renewable.source_line}
         asset_rows.append(row)
@@ -186,45 +187,32 @@ def effective_snapshot(revision: StudyRevision, stage: int, block: int | None, d
             "source_file": item.source_file,
             "source_line": item.source_line,
             "warnings": json.loads(item.warnings_json),
+            "family": item.family, "frequency": item.frequency, "system_code": item.system_code,
+            "header_evidence": json.loads(item.header_evidence_json or "{}"),
+            "interpretation_status": item.interpretation_status,
         })
+    setting = db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.revision_id == revision.id)) or db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.project_id == revision.project_id, MaintenanceSetting.revision_id.is_(None)))
+    availability_basis = setting.availability_basis if setting else "short_term"
+    all_maintenance = list(db.scalars(select(StudyMaintenance).where(StudyMaintenance.revision_id == revision.id)))
+    system_country_by_asset_id = {asset.id: next((system.country_code for system in systems if system.id == asset.system_id), None) for asset in assets}
     for row in asset_rows:
         detail = row.get("technical_details") or {}
-        maintenance_item = next((item for item in maintenance if item["value"] is not None and item["asset_type"] == row["asset_type"] and item["source_code"] == row["source_code"] and (not item["asset_name"] or _maintenance_matches(row["name"], item["asset_name"]))), None)
+        maintenance_item = next((item for item in maintenance if item["asset_type"] == row["asset_type"] and item["source_code"] == row["source_code"] and (not item["asset_name"] or _maintenance_matches(row["name"], item["asset_name"]))), None)
         installed = row["capacity_mw"] or 0.0
         # Availability follows the effective installed capacity. Technical
         # maximums describe the base input, but dated capacity changes must
         # affect the capacity available at the selected stage.
         max_generation = installed or detail.get("max_generation_mw") or 0.0
-        maintenance_mode = study_metadata.get("maintenance_mode")
-        outage = 0 if maintenance_mode == "schedule" else max(
-            float(detail.get("short_term_outage_pct") or 0),
-            float(detail.get("historical_outage_pct") or 0),
-        )
-        available = max_generation * max(0.0, 1.0 - outage / 100.0)
-        maintenance_reduction = 0.0
-        if maintenance_item:
-            value = float(maintenance_item["value"])
-            valid_maintenance = _maintenance_value_is_valid(value, maintenance_item["unit_type"], detail)
-            if valid_maintenance and maintenance_item["measure_type"] == 2:
-                if maintenance_item["unit_type"] == 2:
-                    available = max_generation * value / 100.0
-                elif maintenance_item["unit_type"] == 3:
-                    available = value
-                elif maintenance_item["unit_type"] == 1:
-                    units = detail.get("unit_count") or 1
-                    available = max_generation * max(0.0, min(1.0, value / units))
-            elif valid_maintenance and maintenance_item["measure_type"] == 1:
-                if maintenance_item["unit_type"] == 2:
-                    maintenance_reduction = max_generation * value / 100.0
-                elif maintenance_item["unit_type"] == 3:
-                    maintenance_reduction = value
-                elif maintenance_item["unit_type"] == 1:
-                    units = detail.get("unit_count") or 1
-                    maintenance_reduction = max_generation * min(1.0, value / units)
-                available = max(0.0, available - maintenance_reduction)
+        from app.services.availability import calculate_availability
+        availability = calculate_availability(max_generation, detail, all_maintenance, year=date.year, stage_index=stage_index, basis=availability_basis, asset_name=row["name"], asset_type=row["asset_type"], source_code=row["source_code"], system_code=row.get("system_code"), system_country_code=system_country_by_asset_id.get(row["id"]))
         row["capacity_installed_mw"] = installed
         row["capacity_maximum_mw"] = max_generation
-        row["capacity_available_mw"] = max(0.0, available) if row["is_active"] else 0.0
+        row["capacity_available_mw"] = availability["available"] if row["is_active"] else 0.0
+        row["availability_source"] = availability["source"]
+        row["availability_basis"] = availability_basis if availability["source"].endswith("outage_index") else None
+        row["has_maintenance_plan"] = availability["has_maintenance_plan"]
+        if availability["warning"]:
+            warnings.append(f"{row['source_code']}: {availability['warning']}")
         row["maintenance_value"] = maintenance_item["value"] if maintenance_item else None
         row["maintenance_type"] = maintenance_item["measure_type"] if maintenance_item else None
         row["maintenance_unit"] = maintenance_item["unit_type"] if maintenance_item else None
@@ -235,6 +223,7 @@ def effective_snapshot(revision: StudyRevision, stage: int, block: int | None, d
             "stages": int(study_metadata.get("numero de etapas", 0) or 0),
             "blocks": int((study_metadata.get("numero de bloques demanda") or [0])[0]),
             "frequency": "weekly" if study_metadata.get("etapa") == 1 else "monthly",
+            "availability_basis": availability_basis,
             "block_durations_hours": study_metadata.get("block_durations_hours", {}),
              "warnings": warnings,
             "systems": [{"code": system.code, "name": system.name, "country_code": system.country_code} for system in systems],

@@ -126,6 +126,18 @@ class StudyRevision(Base):
     modifications: Mapped[list["AssetModification"]] = relationship(back_populates="revision", cascade="all, delete-orphan")
 
 
+class MaintenanceSetting(Base):
+    __tablename__ = "maintenance_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    revision_id: Mapped[int | None] = mapped_column(ForeignKey("study_revisions.id"), nullable=True, unique=True, index=True)
+    availability_basis: Mapped[str] = mapped_column(String(20), default="short_term")
+    review_status: Mapped[str] = mapped_column(String(20), default="pending")
+    override_json: Mapped[str] = mapped_column(Text, default="{}")
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class StudySystem(Base):
     __tablename__ = "study_systems"
 
@@ -456,6 +468,8 @@ class StudyProfileStatistic(Base):
     bucket: Mapped[int] = mapped_column(Integer)
     mean: Mapped[float] = mapped_column()
     p10: Mapped[float] = mapped_column()
+    p25: Mapped[float] = mapped_column()
+    p75: Mapped[float] = mapped_column()
     p90: Mapped[float] = mapped_column()
     minimum: Mapped[float] = mapped_column()
     maximum: Mapped[float] = mapped_column()
@@ -514,3 +528,9 @@ class StudyMaintenance(Base):
     source_file: Mapped[str] = mapped_column(String(255))
     source_line: Mapped[int] = mapped_column(Integer)
     warnings_json: Mapped[str] = mapped_column(Text, default="[]")
+    family: Mapped[str] = mapped_column(String(10), default="PMTR")
+    frequency: Mapped[str] = mapped_column(String(20), default="monthly")
+    system_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    header_evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    interpretation_status: Mapped[str] = mapped_column(String(20), default="inferred")
+    review_status: Mapped[str] = mapped_column(String(20), default="pending")

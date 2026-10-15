@@ -83,3 +83,17 @@ class StudyRevisionRead(BaseModel):
     source_archive_sha256: str | None
     is_active: bool
     model_config = ConfigDict(from_attributes=True)
+
+
+class MaintenanceSettingsRead(BaseModel):
+    project_id: int
+    revision_id: int | None
+    availability_basis: str
+    review_status: str
+    override: dict[str, object]
+
+
+class MaintenanceSettingsWrite(BaseModel):
+    availability_basis: str = "short_term"
+    review_status: str | None = None
+    override: dict[str, object] | None = None

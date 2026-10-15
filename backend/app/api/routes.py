@@ -24,6 +24,7 @@ from app.models import (
     DatasetFile,
     EnergyAsset,
     ImportRun,
+    MaintenanceSetting,
     Project,
     StudyAnalyticsJob,
     StudyBus,
@@ -52,6 +53,8 @@ from app.schemas import (
     StudyRevisionRead,
     TenantCreate,
     TenantRead,
+    MaintenanceSettingsRead,
+    MaintenanceSettingsWrite,
 )
 from app.services.encoding import detect_encoding
 from app.services.import_service import run_import_job
@@ -62,6 +65,7 @@ from app.services.snapshot import (
     _stage_date,
     effective_snapshot,
 )
+from app.services.availability import calculate_availability
 from app.settings import settings
 
 router = APIRouter()
@@ -74,7 +78,7 @@ def _profile_stats(values: list[float]) -> dict[str, float | int]:
         lower = int(position)
         upper = min(lower + 1, len(ordered) - 1)
         return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
-    return {"mean": mean(values), "p10": percentile(.1), "p90": percentile(.9), "min": ordered[0], "max": ordered[-1], "stddev": pstdev(values), "valid_count": len(values)}
+    return {"mean": mean(values), "p10": percentile(.1), "p25": percentile(.25), "p75": percentile(.75), "p90": percentile(.9), "min": ordered[0], "max": ordered[-1], "stddev": pstdev(values), "valid_count": len(values)}
 
 
 def tenant_from_header(x_tenant_id: int | None = Header(default=None)) -> int:
@@ -340,6 +344,148 @@ def get_snapshot(
     return effective_snapshot(revision, stage, block, db)
 
 
+def _maintenance_settings_response(setting: MaintenanceSetting) -> dict[str, object]:
+    return {"project_id": setting.project_id, "revision_id": setting.revision_id, "availability_basis": setting.availability_basis, "review_status": setting.review_status, "override": json.loads(setting.override_json or "{}")}
+
+
+def _apply_maintenance_override(db: Session, revision_id: int, override: dict[str, object], review_status: str = "overridden") -> None:
+    measure_type = override.get("measure_type")
+    unit_type = override.get("unit_type")
+    source_file = override.get("source_file")
+    source_code = override.get("source_code")
+    if measure_type not in {1, 2} or unit_type not in {1, 2, 3, 4} or not source_file:
+        return
+    rows = db.scalars(select(StudyMaintenance).where(StudyMaintenance.revision_id == revision_id)).all()
+    for row in rows:
+        if source_file and row.source_file != source_file:
+            continue
+        if source_code and row.source_code != str(source_code):
+            continue
+        row.measure_type = int(measure_type)
+        row.unit_type = int(unit_type)
+        row.interpretation_status = "overridden" if review_status == "overridden" else row.interpretation_status
+        row.review_status = review_status
+
+
+def _maintenance_review_status(rows: list[StudyMaintenance]) -> str:
+    if not rows or any(row.review_status not in {"confirmed", "overridden"} for row in rows):
+        return "pending"
+    return "overridden" if any(row.review_status == "overridden" for row in rows) else "confirmed"
+
+
+@router.get("/projects/{project_id}/maintenance-settings", response_model=MaintenanceSettingsRead, tags=["maintenance"])
+def get_maintenance_settings(project_id: int, tenant_id: int = Depends(tenant_from_header), db: Session = Depends(get_db)):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    setting = db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.project_id == project_id, MaintenanceSetting.revision_id.is_(None)))
+    if setting is None:
+        setting = MaintenanceSetting(project_id=project_id, availability_basis="short_term", review_status="pending")
+        db.add(setting)
+        db.commit()
+        db.refresh(setting)
+    return _maintenance_settings_response(setting)
+
+
+@router.put("/projects/{project_id}/maintenance-settings", response_model=MaintenanceSettingsRead, tags=["maintenance"])
+def update_project_maintenance_settings(project_id: int, payload: MaintenanceSettingsWrite, tenant_id: int = Depends(tenant_from_header), db: Session = Depends(get_db)):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.availability_basis not in {"short_term", "long_term"}:
+        raise HTTPException(status_code=422, detail="availability_basis must be short_term or long_term")
+    setting = db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.project_id == project_id, MaintenanceSetting.revision_id.is_(None))) or MaintenanceSetting(project_id=project_id)
+    setting.availability_basis = payload.availability_basis
+    if payload.review_status is not None:
+        setting.review_status = payload.review_status
+    if payload.override is not None:
+        setting.override_json = json.dumps(payload.override)
+        if setting.revision_id:
+            _apply_maintenance_override(db, revision_id=setting.revision_id, override=payload.override, review_status=payload.review_status or "overridden")
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    return _maintenance_settings_response(setting)
+
+
+@router.put("/projects/{project_id}/revisions/{revision_id}/maintenance-settings", response_model=MaintenanceSettingsRead, tags=["maintenance"])
+def update_maintenance_settings(project_id: int, revision_id: int, payload: MaintenanceSettingsWrite, tenant_id: int = Depends(tenant_from_header), db: Session = Depends(get_db)):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.id == revision_id, StudyRevision.project_id == project_id))
+    if project is None or revision is None:
+        raise HTTPException(status_code=404, detail="Project or revision not found")
+    if payload.availability_basis not in {"short_term", "long_term"}:
+        raise HTTPException(status_code=422, detail="availability_basis must be short_term or long_term")
+    setting = db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.revision_id == revision_id)) or MaintenanceSetting(project_id=project_id, revision_id=revision_id)
+    setting.availability_basis = payload.availability_basis
+    if payload.review_status is not None:
+        setting.review_status = payload.review_status
+    if payload.override is not None:
+        setting.override_json = json.dumps(payload.override)
+        _apply_maintenance_override(db, revision_id=revision_id, override=payload.override, review_status=payload.review_status or "overridden")
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    return _maintenance_settings_response(setting)
+
+
+@router.get("/projects/{project_id}/maintenance-review", tags=["maintenance"])
+def get_maintenance_review(project_id: int, revision_id: int | None = None, tenant_id: int = Depends(tenant_from_header), db: Session = Depends(get_db)):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.id == revision_id, StudyRevision.project_id == project_id)) if revision_id else db.scalar(select(StudyRevision).where(StudyRevision.project_id == project_id, StudyRevision.is_active.is_(True)).order_by(StudyRevision.revision_number.desc()))
+    if revision is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+    setting = db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.revision_id == revision.id)) or db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.project_id == project_id, MaintenanceSetting.revision_id.is_(None)))
+    rows = list(db.scalars(select(StudyMaintenance).where(StudyMaintenance.revision_id == revision.id).order_by(StudyMaintenance.source_file, StudyMaintenance.source_line)))
+    if setting:
+        saved_override = json.loads(setting.override_json or "{}")
+        if saved_override.get("source_file"):
+            saved_override = {str(saved_override["source_file"]): saved_override}
+        for row in rows:
+            if row.review_status == "pending" and row.source_file in saved_override:
+                row.review_status = "overridden"
+        db.commit()
+    tables: dict[str, dict[str, object]] = {}
+    for row in rows:
+        table = tables.setdefault(row.source_file, {"source_file": row.source_file, "family": row.family, "frequency": row.frequency, "system_code": row.system_code, "review_status": "pending", "examples": []})
+        table["review_status"] = "overridden" if table["review_status"] == "overridden" or row.review_status == "overridden" else "confirmed" if table["review_status"] == "confirmed" and row.review_status == "confirmed" else row.review_status
+        examples = table["examples"]
+        if isinstance(examples, list) and len(examples) < 2 and any(float(value) != 0 for value in json.loads(row.stage_values_json)):
+            examples.append({"source_code": row.source_code, "asset_name": row.asset_name, "source_line": row.source_line, "measure_type": row.measure_type, "unit_type": row.unit_type, "values": json.loads(row.stage_values_json)[:3], "warnings": json.loads(row.warnings_json), "header_evidence": json.loads(row.header_evidence_json or "{}"), "interpretation_status": row.interpretation_status})
+    review_status = _maintenance_review_status(rows)
+    if setting and setting.review_status != review_status:
+        setting.review_status = review_status
+        db.commit()
+    return {"project_id": project_id, "revision_id": revision.id, "review_status": review_status, "availability_basis": setting.availability_basis if setting else "short_term", "tables": list(tables.values())}
+
+
+@router.post("/projects/{project_id}/revisions/{revision_id}/maintenance-settings/confirm", response_model=MaintenanceSettingsRead, tags=["maintenance"])
+def confirm_maintenance_settings(project_id: int, revision_id: int, payload: MaintenanceSettingsWrite | None = None, tenant_id: int = Depends(tenant_from_header), db: Session = Depends(get_db)):
+    project = db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+    revision = db.scalar(select(StudyRevision).where(StudyRevision.id == revision_id, StudyRevision.project_id == project_id))
+    if project is None or revision is None:
+        raise HTTPException(status_code=404, detail="Project or revision not found")
+    setting = db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.revision_id == revision_id)) or MaintenanceSetting(project_id=project_id, revision_id=revision_id)
+    if payload and payload.override is not None:
+        existing_override = json.loads(setting.override_json or "{}")
+        source_file = payload.override.get("source_file")
+        if source_file:
+            existing_override[str(source_file)] = payload.override
+        setting.override_json = json.dumps(existing_override)
+        _apply_maintenance_override(db, revision_id=revision_id, override=payload.override, review_status=payload.review_status or "overridden")
+    if payload and payload.availability_basis in {"short_term", "long_term"}:
+        setting.availability_basis = payload.availability_basis
+    rows = list(db.scalars(select(StudyMaintenance).where(StudyMaintenance.revision_id == revision_id)))
+    setting.review_status = _maintenance_review_status(rows)
+    setting.confirmed_at = datetime.utcnow()
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    return _maintenance_settings_response(setting)
+
+
 @router.get("/projects/{project_id}/buses/{bus_code}/demand", tags=["visualizer"])
 def get_bus_demand(
     project_id: int,
@@ -522,8 +668,12 @@ def get_entity_history(
                 "lifecycle_status": entity["lifecycle_status"],
                 "is_active": entity["is_active"],
                 "capacity_installed_mw": entity.get("capacity_installed_mw"),
-                "capacity_maximum_mw": entity.get("capacity_maximum_mw"),
-                "capacity_available_mw": entity.get("capacity_available_mw"),
+                 "capacity_maximum_mw": entity.get("capacity_maximum_mw"),
+                 "capacity_available_mw": entity.get("capacity_available_mw"),
+                 "availability_source": entity.get("availability_source"),
+                 "availability_basis": entity.get("availability_basis"),
+                 "availability_warning": entity.get("availability_warning"),
+                 "has_maintenance_plan": entity.get("has_maintenance_plan"),
                 "maintenance_value": entity.get("maintenance_value"),
                 "maintenance_type": entity.get("maintenance_type"),
                 "maintenance_unit": entity.get("maintenance_unit"),
@@ -552,14 +702,17 @@ def get_asset_history(
     initial_year = int(metadata.get("ano inicial", 2023))
     stages = int(metadata.get("numero de etapas", 0) or 0)
     weekly = metadata.get("etapa") == 1
-    maintenance_mode = metadata.get("maintenance_mode")
     modifications = [item for item in db.scalars(select(AssetModification).where(AssetModification.revision_id == revision.id, AssetModification.entity_type == asset.asset_type, AssetModification.source_code == asset.source_code).order_by(AssetModification.effective_date, AssetModification.sequence)) if _modification_applies(asset.name, item)]
     maintenances = list(db.scalars(select(StudyMaintenance).where(StudyMaintenance.revision_id == revision.id, StudyMaintenance.asset_type == asset.asset_type, StudyMaintenance.source_code == asset.source_code)))
+    setting = db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.revision_id == revision.id)) or db.scalar(select(MaintenanceSetting).where(MaintenanceSetting.project_id == project_id, MaintenanceSetting.revision_id.is_(None)))
+    availability_basis = setting.availability_basis if setting else "short_term"
     detail = None
     if asset.asset_type == "thermal":
         detail = db.scalar(select(StudyThermalDetail).where(StudyThermalDetail.revision_id == revision.id, StudyThermalDetail.source_code == asset.source_code))
     elif asset.asset_type == "hydro":
         detail = db.scalar(select(StudyHydroDetail).where(StudyHydroDetail.revision_id == revision.id, StudyHydroDetail.source_code == asset.source_code))
+    system_code = db.scalar(select(StudySystem.code).where(StudySystem.id == asset.system_id)) if asset.system_id else None
+    system_country_code = db.scalar(select(StudySystem.country_code).where(StudySystem.id == asset.system_id)) if asset.system_id else None
     current_capacity = asset.capacity_mw or 0.0
     operating_factor = asset.operating_factor
     lifecycle = asset.lifecycle_status
@@ -583,33 +736,19 @@ def get_asset_history(
         # Dated capacity changes alter the installed capacity for this stage;
         # maintenance and outage factors are applied to that effective value.
         maximum = float(current_capacity or getattr(detail, "max_generation_mw", None) or 0.0)
-        outage = 0 if maintenance_mode == "schedule" else max(
-            float(getattr(detail, "short_term_outage_pct", None) or 0),
-            float(getattr(detail, "historical_outage_pct", None) or 0),
-        )
-        available = maximum * max(0, 1 - outage / 100)
         stage_index = stage if weekly else date.month
-        matching = [item for item in maintenances if item.year == date.year and (not item.asset_name or _maintenance_matches(asset.name, item.asset_name))]
-        maintenance_value = None
-        maintenance_item = matching[-1] if matching else None
-        if maintenance_item:
-            values = json.loads(maintenance_item.stage_values_json)
-            maintenance_value = values[stage_index - 1] if len(values) >= stage_index else None
+        detail_values = {"unit_count": getattr(detail, "unit_count", None), "short_term_outage_pct": getattr(detail, "short_term_outage_pct", None), "historical_outage_pct": getattr(detail, "historical_outage_pct", None)}
+        availability = calculate_availability(maximum, detail_values, maintenances, year=date.year, stage_index=stage_index, basis=availability_basis, asset_name=asset.name, asset_type=asset.asset_type, source_code=asset.source_code, system_code=system_code, system_country_code=system_country_code)
+        maintenance_item = availability["maintenance"]
+        maintenance_value = availability["value"]
         maintenance_type = maintenance_item.measure_type if maintenance_item else None
         maintenance_unit = maintenance_item.unit_type if maintenance_item else None
-        if maintenance_item and maintenance_value is not None:
-            value = float(maintenance_value)
-            valid_maintenance = _maintenance_value_is_valid(value, maintenance_unit or 0, {"unit_count": getattr(detail, "unit_count", None)})
-            if valid_maintenance and maintenance_type == 2:
-                available = maximum * value / 100 if maintenance_unit == 2 else value if maintenance_unit == 3 else maximum * max(0, min(1, value / max(1, getattr(detail, "unit_count", None) or 1)))
-            elif valid_maintenance and maintenance_type == 1:
-                reduction = maximum * value / 100 if maintenance_unit == 2 else value if maintenance_unit == 3 else maximum * min(1, value / max(1, getattr(detail, "unit_count", None) or 1))
-                available = max(0, available - reduction)
+        if maintenance_item:
             event = {"kind": "maintenance", "source_file": maintenance_item.source_file, "source_line": maintenance_item.source_line, "effective_date": date.date().isoformat(), "value": maintenance_value, "measure_type": maintenance_type, "unit_type": maintenance_unit}
-            if not valid_maintenance:
-                event["warning"] = "Maintenance value is incompatible with the declared unit count and was not applied."
+            if availability["warning"]:
+                event["warning"] = availability["warning"]
             stage_events.append(event)
-        series.append({"stage": stage, "as_of": date.date().isoformat(), "year": date.year, "month": date.month, "lifecycle_status": lifecycle, "is_active": lifecycle == "existing" and current_capacity > 0, "capacity_installed_mw": current_capacity, "capacity_maximum_mw": maximum, "capacity_available_mw": available if lifecycle == "existing" else 0, "operating_factor": operating_factor, "maintenance_value": maintenance_value, "maintenance_type": maintenance_type, "maintenance_unit": maintenance_unit, "events": stage_events, "value_kind": "derived"})
+        series.append({"stage": stage, "as_of": date.date().isoformat(), "year": date.year, "month": date.month, "lifecycle_status": lifecycle, "is_active": lifecycle == "existing" and current_capacity > 0, "capacity_installed_mw": current_capacity, "capacity_maximum_mw": maximum, "capacity_available_mw": availability["available"] if lifecycle == "existing" else 0, "availability_source": availability["source"], "availability_basis": availability_basis if availability["source"].endswith("outage_index") else None, "availability_warning": availability["warning"], "has_maintenance_plan": availability["has_maintenance_plan"], "operating_factor": operating_factor, "maintenance_value": maintenance_value, "maintenance_type": maintenance_type, "maintenance_unit": maintenance_unit, "events": stage_events, "value_kind": "derived"})
     return {"asset_id": asset_id, "frequency": "weekly" if weekly else "monthly", "series": series, "provenance": "targeted intermediate database history"}
 
 
@@ -723,6 +862,8 @@ def get_asset_profile_statistics(
             "month" if kind == "hydro-monthly" else "hour": row.bucket,
             "mean": row.mean,
             "p10": row.p10,
+            "p25": row.p25,
+            "p75": row.p75,
             "p90": row.p90,
             "min": row.minimum,
             "max": row.maximum,

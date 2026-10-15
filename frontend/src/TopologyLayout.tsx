@@ -38,21 +38,24 @@ export function TopologyLayout({
   buses,
   circuits,
   entities,
-  onSelect,
+  onSelectBus,
+  selectedBus,
   showDemandReferences,
 }: {
   buses: Bus[];
   circuits: Circuit[];
   entities: Entity[];
-  onSelect: (entity: Entity) => void;
+  onSelectBus: (busCode: string) => void;
+  selectedBus: string;
   showDemandReferences: boolean;
 }) {
   const [zoom, setZoom] = useState(1);
+  const maxRows = 6;
   const nodes = useMemo(
     () =>
       buses.map((bus, index) => {
-        const column = index % 8;
-        const row = Math.floor(index / 8);
+        const column = Math.floor(index / maxRows);
+        const row = index % maxRows;
         const assets = entities.filter(
           (entity) =>
             entity.bus?.toString() === bus.source_code && entity.is_active,
@@ -64,9 +67,9 @@ export function TopologyLayout({
   const nodeByCode = new Map(nodes.map((node) => [node.bus.source_code, node]));
   const width = Math.max(
     760,
-    88 + Math.min(8, Math.max(1, nodes.length)) * 104,
+    88 + Math.max(1, Math.ceil(nodes.length / maxRows)) * 104,
   );
-  const height = Math.max(180, 84 + Math.ceil(nodes.length / 8) * 76);
+  const height = Math.max(180, 84 + Math.min(maxRows, nodes.length) * 76);
   return (
     <div
       className="topology-layout"
@@ -98,9 +101,8 @@ export function TopologyLayout({
       <div className="topology-viewport">
         <svg
           style={{
-            width: `${zoom * 100}%`,
-            minWidth: `${zoom * width}px`,
-            height: `${zoom * 320}px`,
+            width: `${zoom * width}px`,
+            height: `${zoom * height}px`,
           }}
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="xMinYMin meet"
@@ -127,8 +129,20 @@ export function TopologyLayout({
             {nodes.map((node) => (
               <g
                 key={node.bus.source_code}
+                className={selectedBus === node.bus.source_code ? "selected" : ""}
                 transform={`translate(${node.x} ${node.y})`}
+                role="button"
+                tabIndex={0}
+                aria-label={`Select bus ${node.bus.source_code}${node.bus.name ? `, ${node.bus.name}` : ""}, ${node.assets.length} active generator${node.assets.length === 1 ? "" : "s"}${node.bus.demand_mw ? `, demand ${Math.round(node.bus.demand_mw)} megawatts` : ""}`}
+                onClick={() => onSelectBus(node.bus.source_code)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelectBus(node.bus.source_code);
+                  }
+                }}
               >
+                <circle className="topology-hit-target" r="22" />
                 <circle
                   className={node.bus.demand_mw ? "demand-node" : ""}
                   r={Math.min(18, 9 + node.assets.length * 2)}
@@ -160,13 +174,9 @@ export function TopologyLayout({
                       width="16"
                       height="16"
                     >
-                      <button
-                        className="topology-asset"
-                        aria-label={`Select ${asset.name}`}
-                        onClick={() => onSelect(asset)}
-                      >
-                        <Icon size={12} />
-                      </button>
+                       <span className="topology-asset" aria-hidden="true" title={asset.name}>
+                         <Icon size={12} />
+                       </span>
                     </foreignObject>
                   );
                 })}
@@ -176,8 +186,8 @@ export function TopologyLayout({
         </svg>
       </div>
       <div className="topology-source">
-        Nodes and links derived from DBUS.DAT and DCIRC.DAT. Geographic
-        coordinates were not provided.
+        Derived from tenant-scoped bus and circuit input records. Geographic
+        coordinates were not provided; source provenance remains in the inspector.
       </div>
     </div>
   );

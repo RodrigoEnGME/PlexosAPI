@@ -24,13 +24,17 @@ const snapshot = {
 test('system workspace loads API data and changes stage context', async ({ page }) => {
   await page.route(/\/api\/projects$/, async (route) => route.fulfill({ json: [{ id: 1, name: 'UY revision' }] }));
   await page.route(/\/api\/projects\/1\/revisions$/, async (route) => route.fulfill({ json: [{ id: 1, revision_number: 1, status: 'parsed', is_active: true }] }));
+  await page.route(/\/api\/projects\/1\/maintenance-settings$/, async (route) => route.fulfill({ json: { project_id: 1, revision_id: null, availability_basis: 'short_term', review_status: 'pending', override: {} } }));
+  let maintenanceReviewConfirmed = false;
+  await page.route(/\/api\/projects\/1\/maintenance-review$/, async (route) => route.fulfill({ json: { project_id: 1, revision_id: 1, review_status: maintenanceReviewConfirmed ? 'overridden' : 'pending', availability_basis: 'short_term', tables: [{ source_file: 'pmtrmeni.dat', family: 'PMTR', frequency: 'monthly', system_code: 'ni', review_status: maintenanceReviewConfirmed ? 'overridden' : 'pending', examples: [{ source_code: '413', asset_name: 'NI-MTRO-Z_TV', source_line: 3, measure_type: 1, unit_type: 2, values: [17.1, 17.1], warnings: [], header_evidence: {} , interpretation_status: 'inferred' }] }] } }));
+  await page.route(/\/api\/projects\/1\/revisions\/1\/maintenance-settings\/confirm$/, async (route) => { maintenanceReviewConfirmed = true; await route.fulfill({ json: { project_id: 1, revision_id: 1, availability_basis: 'short_term', review_status: 'confirmed', override: {} } }); });
   await page.route(/\/api\/projects\/1\/analytics\/status$/, async (route) => route.fulfill({ json: { status: 'running', phase: 'profile statistics', progress: 40, processed_assets: 2, total_assets: 5, error: null } }));
   await page.route(/\/api\/projects\/1\/snapshot.*/, async (route) => {
     const url = new URL(route.request().url());
     await route.fulfill({ json: { ...snapshot, stage: Number(url.searchParams.get('stage') ?? 1) } });
   });
   await page.route(/\/api\/projects\/1\/assets\/1\/history.*/, async (route) => route.fulfill({ json: { series: [{ stage: 1, as_of: '2023-01-01', lifecycle_status: 'existing', is_active: true, capacity_available_mw: 100, events: [{ kind: 'modification', effective_date: '2023-01-01', source_file: 'mtermiur.dat', source_line: 4, fields: { capacity: '120' } }] }] } }));
-  await page.route(/\/api\/projects\/1\/assets\/1\/profile-statistics$/, async (route) => route.fulfill({ json: { status: 'ready', grouping: 'daily hour', unit: 'MW', statistics: { mean: 50, p10: 20, p90: 80, min: 10, max: 90, stddev: 12, valid_count: 24 }, series: Array.from({ length: 24 }, (_, index) => ({ hour: index + 1, mean: 50, p10: 20, p90: 80, min: 10, max: 90, stddev: 12, valid_count: 1 })) } }));
+  await page.route(/\/api\/projects\/1\/assets\/1\/profile-statistics$/, async (route) => route.fulfill({ json: { status: 'ready', grouping: 'daily hour', unit: 'MW', statistics: { mean: 50, p10: 20, p25: 35, p75: 65, p90: 80, min: 10, max: 90, stddev: 12, valid_count: 24 }, series: Array.from({ length: 24 }, (_, index) => ({ hour: index + 1, mean: 50, p10: 20, p25: 35, p75: 65, p90: 80, min: 10, max: 90, stddev: 12, valid_count: 1 })) } }));
   await page.route(/\/api\/projects\/1\/buses\/800\/demand.*/, async (route) => route.fulfill({ json: { bus_code: '800', bus_name: 'Salto', authority: 'DBF', selected_date: '2023-01-01', available_dates: ['2023-01-01'], records: [{ block: 1, demand_mw: 10, demand_code: '1', effective_date: '2023-01-01', source_file: 'dbf.dat', source_line: 2, value_kind: 'input' }], summary: { total_mw: 10, peak_mw: 10, block_count: 1 }, warnings: [], provenance: 'DBF test fixture' } }));
   await page.goto('/');
   await expect(page.getByRole('heading', { name: /UY revision system view/i })).toBeVisible();
@@ -44,10 +48,17 @@ test('system workspace loads API data and changes stage context', async ({ page 
   await page.getByRole('button', { name: /Terra/ }).click();
   await expect(page.getByRole('heading', { name: 'Terra' })).toBeVisible();
   await expect(page.locator('.capacity-history-chart')).toBeVisible();
+  await expect(page.locator('.profile-chart')).toBeVisible();
+  await expect(page.locator('.profile-band-area path')).toHaveCount(1);
+  await expect(page.locator('.profile-band-area path')).toHaveAttribute('fill', /#49a7e0|#2587c8/);
   await expect(page.getByText('Potencia instalada: 120 MW')).toBeVisible();
   await expect(page.getByLabel('Months shown in capacity history')).toHaveValue('60');
   await expect(page.getByLabel('Y scale')).toHaveValue('absolute');
-  await expect(page.getByText('P10-P90 empirical band')).toBeVisible();
+  await expect(page.getByText('P25-P75 interquartile band')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Review PM table settings' })).toBeVisible();
+  await expect(page.getByLabel('Availability basis')).toHaveValue('short_term');
+  await page.getByRole('button', { name: 'Confirm table' }).click();
+  await expect(page.getByRole('heading', { name: 'Review PM table settings' })).toHaveCount(0);
   await expect(page.getByLabel('System')).toHaveValue('all');
   await page.getByLabel('System').selectOption('ur');
   await expect(page.getByLabel('System')).toHaveValue('ur');

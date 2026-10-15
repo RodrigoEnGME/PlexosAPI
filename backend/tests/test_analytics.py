@@ -8,6 +8,8 @@ def test_empirical_quantiles_interpolate_discrete_pairs() -> None:
 
     assert result["mean"] == 9.5
     assert result["p10"] == pytest.approx(1.9)
+    assert result["p25"] == pytest.approx(4.75)
+    assert result["p75"] == pytest.approx(14.25)
     assert result["p90"] == pytest.approx(17.1)
     assert result["valid_count"] == 20
 

@@ -55,6 +55,19 @@ def test_builds_intermediate_uruguay_model() -> None:
         assert result["renewable_assignments"] > 0
         assert db.query(StudyRenewableAssignment).count() > 0
         assert db.query(StudyMaintenance).count() > 100
+        parsed_maintenance = db.query(StudyMaintenance).first()
+        assert parsed_maintenance.family in {"PMHI", "PMTR"}
+        assert parsed_maintenance.frequency in {"weekly", "monthly"}
+        assert parsed_maintenance.system_code
+        assert json.loads(parsed_maintenance.header_evidence_json)
+        assert parsed_maintenance.measure_type in {1, 2}
+        assert parsed_maintenance.unit_type in {1, 2, 3, 4}
+        mot_maintenance = db.query(StudyMaintenance).filter_by(asset_type="thermal", source_code="101").first()
+        assert mot_maintenance is not None
+        assert mot_maintenance.measure_type == 1
+        assert mot_maintenance.unit_type == 2
+        assert mot_maintenance.frequency == "monthly"
+        assert mot_maintenance.system_code == "ur"
         snapshot = effective_snapshot(revision, stage=1, block=1, db=db)
         assert snapshot["provenance"] == "intermediate database snapshot"
         assert snapshot["study"]["initial_year"] == 2023

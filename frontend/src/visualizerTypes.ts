@@ -16,6 +16,10 @@ export type Entity = {
   capacity_installed_mw?: number;
   capacity_maximum_mw?: number;
   capacity_available_mw?: number;
+  availability_source?: string;
+  availability_basis?: "short_term" | "long_term" | null;
+  availability_warning?: string | null;
+  has_maintenance_plan?: boolean;
   operating_factor?: number;
   technical_details?: TechnicalDetails;
   maintenance_value?: number | null;
